@@ -210,3 +210,38 @@ pytest -q
 # covers: 404 on missing result, 422 on empty upload / invalid match body,
 # 401 on unauthenticated calls, and a full extract -> results round-trip.
 ```
+
+---
+
+## Ticket 6 — The API docs are poor
+
+### What was wrong
+
+The OpenAPI schema was the bare FastAPI default: title `"docintel"`, no
+description, no examples, no documented error responses, and endpoints returned
+undeclared ad-hoc dicts — so the Swagger UI did not reflect real behaviour and
+could not be integrated against on its own.
+
+### What we changed
+
+- **App-level metadata:** meaningful `title`, `version`, `summary` and a
+  Markdown `description` documenting the typical flow and the auth requirement.
+- **Tags** (`system`, `profiles`, `matching`) grouping the endpoints.
+- **Per-endpoint `summary`** and **declared `response_model`** so every success
+  shape is documented.
+- **Documented error responses** (`401`, `404`, `422`, `502`) each pointing at
+  `ErrorResponse`, so the failure modes appear in the schema.
+- **Field-level `description` and `examples`** on every schema field, so request
+  and response bodies render with realistic sample values in Swagger UI.
+
+### Result
+
+The generated docs now match real behaviour and are self-sufficient.
+
+### How to verify
+
+```bash
+# with the app running (uvicorn app.main:app):
+#   Swagger UI:   http://localhost:8000/docs
+#   Raw schema:   http://localhost:8000/openapi.json
+```

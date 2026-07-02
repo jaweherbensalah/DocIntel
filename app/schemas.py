@@ -4,38 +4,92 @@ from pydantic import BaseModel, Field
 
 
 class Profile(BaseModel):
-    name: str = ""
-    skills: List[str] = Field(default_factory=list)
-    years_experience: int = Field(default=0, ge=0)
+    """A structured candidate profile extracted from a CV."""
+
+    name: str = Field(
+        default="",
+        description="Candidate name (best-effort from the CV).",
+        examples=["Jane Doe"],
+    )
+    skills: List[str] = Field(
+        default_factory=list,
+        description="Normalised skills detected in the document.",
+        examples=[["python", "fastapi", "docker"]],
+    )
+    years_experience: int = Field(
+        default=0,
+        ge=0,
+        description="Total years of experience detected.",
+        examples=[5],
+    )
 
 
 class ExtractResponse(BaseModel):
-    id: str
+    """Response body returned by ``POST /extract``."""
+
+    id: str = Field(
+        ...,
+        description="Result id; pass to GET /results/{id} to retrieve it later.",
+        examples=["a1b2c3d4e5f6"],
+    )
     profile: Profile
 
 
 class MatchRequest(BaseModel):
-    profile: Profile
-    job_description: str = Field(..., min_length=1)
+    """Request body for ``POST /match``."""
+
+    profile: Profile = Field(
+        ..., description="Candidate profile, typically from POST /extract."
+    )
+    job_description: str = Field(
+        ...,
+        min_length=1,
+        description="Free-text job description to score the profile against.",
+        examples=["Senior Python engineer with FastAPI and Kubernetes experience."],
+    )
 
 
 class MatchResponse(BaseModel):
-    id: str
-    score: int = Field(..., ge=0, le=100)
-    matched_skills: List[str] = Field(default_factory=list)
-    missing_skills: List[str] = Field(default_factory=list)
-    rationale: str
+    """Response body returned by ``POST /match``."""
+
+    id: str = Field(
+        ...,
+        description="Result id; pass to GET /results/{id} to retrieve it later.",
+        examples=["a1b2c3d4e5f6"],
+    )
+    score: int = Field(
+        ..., ge=0, le=100, description="Overall match score, 0-100.", examples=[67]
+    )
+    matched_skills: List[str] = Field(
+        default_factory=list, description="Required skills the candidate has."
+    )
+    missing_skills: List[str] = Field(
+        default_factory=list, description="Required skills the candidate lacks."
+    )
+    rationale: str = Field(
+        ..., description="Short human-readable explanation of the score."
+    )
 
 
 class ResultResponse(BaseModel):
+    """A previously stored extract or match result."""
+
     id: str
-    kind: str
-    result: dict
+    kind: str = Field(
+        ..., description="The kind of result: 'extract' or 'match'.", examples=["extract"]
+    )
+    result: dict = Field(..., description="The stored result payload.")
 
 
 class HealthResponse(BaseModel):
-    status: str = "ok"
+    status: str = Field(default="ok", examples=["ok"])
 
 
 class ErrorResponse(BaseModel):
-    detail: str
+    """Standard error envelope used across the API."""
+
+    detail: str = Field(
+        ...,
+        description="Human-readable description of the error.",
+        examples=["result not found"],
+    )

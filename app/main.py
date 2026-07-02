@@ -20,6 +20,7 @@ from app.db import engine, session
 from app.llm import get_provider
 from app.models import Base, Result
 from app.schemas import (
+    ErrorResponse,
     ExtractResponse,
     HealthResponse,
     MatchRequest,
@@ -33,6 +34,33 @@ logger = logging.getLogger("docintel")
 
 UPLOAD_DIR = "uploads"
 
+API_DESCRIPTION = """
+`docintel` extracts a structured candidate profile from a CV and scores it
+against a job description.
+
+### Typical flow
+1. `POST /extract` — upload a CV, receive a structured `profile` and a result `id`.
+2. `POST /match` — send a profile plus a job description, receive a `score`,
+   matched/missing skills and a short rationale.
+3. `GET /results/{id}` — fetch any previously stored extract or match result.
+
+### Authentication
+`POST /extract` and `POST /match` require an API key in the `x-api-key`
+header. Requests without a valid key receive `401 Unauthorized`.
+"""
+
+tags_metadata = [
+    {"name": "system", "description": "Service health and liveness."},
+    {
+        "name": "profiles",
+        "description": "Extract profiles from CVs and fetch stored results.",
+    },
+    {
+        "name": "matching",
+        "description": "Score candidate profiles against job descriptions.",
+    },
+]
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -41,7 +69,14 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="docintel", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="docintel API",
+    version="1.0.0",
+    summary="Extract structured profiles from CVs and score them against jobs.",
+    description=API_DESCRIPTION,
+    openapi_tags=tags_metadata,
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,20 +87,44 @@ app.add_middleware(
 )
 
 
-def check_auth(x_api_key: str = Header(default=None)):
+def check_auth(x_api_key: str = Header(default=None, description="Client API key.")):
     if x_api_key != settings.api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid api key"
         )
 
 
-@app.get("/health", response_model=HealthResponse)
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+    tags=["system"],
+    summary="Liveness check",
+)
 async def health():
     return HealthResponse(status="ok")
 
 
-@app.post("/extract", response_model=ExtractResponse)
-async def extract(file: UploadFile = File(...), _=Depends(check_auth)):
+@app.post(
+    "/extract",
+    response_model=ExtractResponse,
+    tags=["profiles"],
+    summary="Extract a structured profile from a CV",
+    responses={
+        401: {"model": ErrorResponse, "description": "Missing or invalid API key."},
+        422: {
+            "model": ErrorResponse,
+            "description": "The uploaded file was empty or unreadable.",
+        },
+        502: {
+            "model": ErrorResponse,
+            "description": "The extraction provider failed.",
+        },
+    },
+)
+async def extract(
+    file: UploadFile = File(..., description="CV document to process (UTF-8 text)."),
+    _=Depends(check_auth),
+):
     content = await file.read()
     if not content:
         raise HTTPException(status_code=422, detail="uploaded file is empty")
@@ -92,7 +151,19 @@ async def extract(file: UploadFile = File(...), _=Depends(check_auth)):
     return ExtractResponse(id=rid, profile=Profile(**profile))
 
 
-@app.post("/match", response_model=MatchResponse)
+@app.post(
+    "/match",
+    response_model=MatchResponse,
+    tags=["matching"],
+    summary="Score a profile against a job description",
+    responses={
+        401: {"model": ErrorResponse, "description": "Missing or invalid API key."},
+        422: {
+            "model": ErrorResponse,
+            "description": "The request body failed validation.",
+        },
+    },
+)
 async def match(body: MatchRequest, _=Depends(check_auth)):
     result = get_provider().match(body.profile.model_dump(), body.job_description)
 
@@ -102,7 +173,15 @@ async def match(body: MatchRequest, _=Depends(check_auth)):
     return MatchResponse(id=rid, **result)
 
 
-@app.get("/results/{rid}", response_model=ResultResponse)
+@app.get(
+    "/results/{rid}",
+    response_model=ResultResponse,
+    tags=["profiles"],
+    summary="Fetch a previously stored result",
+    responses={
+        404: {"model": ErrorResponse, "description": "No result exists with that id."},
+    },
+)
 async def get_result(rid: str):
     obj = await session.get(Result, rid)
     if obj is None:
