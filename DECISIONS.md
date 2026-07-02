@@ -161,3 +161,52 @@ docker run --rm docintel:secure sh -c "find /app -name '*.pyc'"     # -> app/*.p
 # App still loads from bytecode:
 docker run --rm docintel:secure python -c "import app.main; print('import OK')"
 ```
+
+---
+
+## Ticket 5 — The API contract is loose
+
+### What was wrong
+
+- **Errors returned `200 OK`.** `/extract` returned `{"error": ...}` and
+  `/results/{id}` returned `{"error": "not found"}` — both with a `200` status,
+  so a client could not detect failure from the status code.
+- **Untyped request body.** `/match` accepted `body: dict` and reached into it
+  with `.get(...)`, so malformed requests silently produced empty results
+  instead of a validation error.
+- **Unused schemas.** `app/schemas.py` defined `Profile` / `MatchRequest` /
+  `MatchResult` that no endpoint actually used.
+- **Inconsistent shapes.** Success and error responses had no common structure.
+
+### What we changed
+
+- **Typed request/response models** for every endpoint
+  (`ExtractResponse`, `MatchRequest`, `MatchResponse`, `ResultResponse`,
+  `HealthResponse`) wired up via FastAPI `response_model`.
+- **Correct status codes:**
+  - `401` — missing/invalid API key (unchanged, now also declared).
+  - `404` — `GET /results/{id}` for an unknown id (was `200`).
+  - `422` — empty upload to `/extract`, or a `/match` body that fails
+    validation.
+  - `502` — the extraction provider raised (was a `200 {"error": ...}`).
+- **One consistent error envelope** — `{"detail": "..."}` (`ErrorResponse`),
+  matching FastAPI's native `HTTPException` shape.
+- **`Profile` is lenient** (fields default to empty) so an integrator can send a
+  partial profile to `/match` without reconstructing a full extract result.
+
+### Why this approach (trade-offs)
+
+- **`502` (not `500`) for provider failure** — the model call is an upstream
+  dependency; `502 Bad Gateway` tells the integrator it is an upstream problem,
+  not a bug in their request.
+- **Scope kept to the contract.** `GET /results/{id}` deliberately still has no
+  auth here — adding authentication belongs to **Ticket 2**, so we keep this
+  commit focused and avoid documenting auth we have not yet enforced.
+
+### How to verify
+
+```bash
+pytest -q
+# covers: 404 on missing result, 422 on empty upload / invalid match body,
+# 401 on unauthenticated calls, and a full extract -> results round-trip.
+```
