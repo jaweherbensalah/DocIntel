@@ -75,3 +75,89 @@ docker build -t docintel:after .
 docker images docintel:after --format '{{.Repository}}:{{.Tag}}  {{.Size}}'
 # -> docintel:after  327MB
 ```
+
+---
+
+## Ticket 3 — The image leaks our code
+
+### What was wrong
+
+The original image copied the raw project into the container (`COPY . .`) and
+ran as root. Anyone who could `docker exec` (or `docker cp`) into a running
+container could read every `.py` file — our proprietary extraction/matching
+pipeline — straight off the filesystem in plain text.
+
+### What we changed
+
+In the builder stage we now **compile the app to bytecode and delete the
+source** before it ever reaches the runtime image:
+
+```dockerfile
+COPY app ./app
+RUN python -m compileall -b -q app \
+    && find app -type f -name '*.py' -delete \
+    && find app -type d -name '__pycache__' -prune -exec rm -rf {} +
+```
+
+The runtime stage then copies **only the compiled package** from the builder:
+
+```dockerfile
+COPY --from=builder /app/app ./app
+```
+
+- `compileall -b` writes legacy `module.pyc` files *next to* each source file
+  (instead of inside `__pycache__/`). Once the `.py` is removed, Python imports
+  the `.pyc` directly ("sourceless import").
+- The final image contains `main.pyc`, `llm.pyc`, `config.pyc`, … and **no
+  `.py` files at all**.
+- Combined with the already-present non-root `appuser`, an attacker who gets a
+  shell in the container finds no readable source and no root privileges.
+
+### Why this approach (trade-offs)
+
+This is **defense-in-depth, not encryption.** We are explicit about that:
+
+- Python is an interpreted language. Bytecode is *not* secret — tools like
+  `decompyle3` / `uncompyle6` can reconstruct approximate source from `.pyc`.
+  There is **no way to make a Python image truly unreadable** to someone who
+  controls the container; anything the interpreter can run, a determined
+  attacker can recover.
+- What we *can* do — and did — is remove the easy path: no plaintext source
+  lying on disk, no root shell, minimal tooling in the image. This raises the
+  cost of extraction from "cat a file" to "decompile bytecode," which is a
+  meaningful, honest improvement.
+
+Stronger options we considered and deliberately did **not** take (avoiding
+gold-plating for this stage):
+
+- **Cython → native `.so`.** Compiling modules to C extensions is much harder to
+  reverse than `.pyc`, but it adds a compiler toolchain to the builder, slows
+  builds, and complicates debugging/stack traces. Worth it only if the business
+  truly requires it.
+- **Commercial obfuscators (e.g. PyArmor).** Extra dependency and licensing for
+  a still-not-unbreakable result.
+- **Serving the sensitive logic from a separate backend the client never
+  runs.** The architecturally "correct" answer if the IP is critical, but out
+  of scope for a container-hardening ticket.
+
+### Result
+
+| | Source in image | Runs as | Import works |
+|---|---|---|---|
+| Before | all `.py` readable | root | yes |
+| After | `.pyc` bytecode only, **no `.py`** | non-root `appuser` | yes |
+
+### How to verify
+
+```bash
+docker build -t docintel:secure .
+
+# No .py source in the image:
+docker run --rm docintel:secure sh -c "find /app -name '*.py'"      # -> (empty)
+
+# Only compiled bytecode is present:
+docker run --rm docintel:secure sh -c "find /app -name '*.pyc'"     # -> app/*.pyc
+
+# App still loads from bytecode:
+docker run --rm docintel:secure python -c "import app.main; print('import OK')"
+```

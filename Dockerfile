@@ -12,6 +12,16 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --prefix=/install -r requirements.txt
 
+# Copy the application source, compile it to bytecode, then delete every .py
+# source file. Only compiled .pyc bytecode is carried into the runtime image,
+# so the proprietary pipeline logic is not readable as plain source.
+#   -b : write legacy "module.pyc" next to the source (not in __pycache__),
+#        so the .pyc can be imported directly once the .py is removed.
+COPY app ./app
+RUN python -m compileall -b -q app \
+    && find app -type f -name '*.py' -delete \
+    && find app -type d -name '__pycache__' -prune -exec rm -rf {} +
+
 # ---- Stage 2: runtime ----
 # Minimal image that only carries the installed packages and the app code.
 FROM python:3.11-slim AS runtime
@@ -27,8 +37,9 @@ WORKDIR /app
 # Bring in the dependencies installed in the builder stage.
 COPY --from=builder /install /usr/local
 
-# Copy only the application code (no tests, fixtures, docs, or VCS metadata).
-COPY app ./app
+# Copy only the compiled bytecode from the builder (no .py source, no tests,
+# fixtures, docs, or VCS metadata).
+COPY --from=builder /app/app ./app
 
 USER appuser
 
