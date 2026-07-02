@@ -3,6 +3,7 @@ import os
 os.environ["DATABASE_URL"] = (
     "sqlite+aiosqlite:///./test_docintel.db"  # tests run on SQLite
 )
+os.environ["API_KEY"] = "test-key"  # required by config; set before app import
 
 import pytest
 from fastapi.testclient import TestClient
@@ -81,8 +82,16 @@ def test_extract_empty_file_returns_422(client):
     assert r.status_code == 422
 
 
+def test_results_requires_auth(client):
+    r = client.get("/results/anything")
+    assert r.status_code == 401
+
+
 def test_results_not_found_returns_404(client):
-    r = client.get("/results/does-not-exist")
+    r = client.get(
+        "/results/does-not-exist",
+        headers={"x-api-key": settings.api_key},
+    )
     assert r.status_code == 404
     assert r.json()["detail"] == "result not found"
 
@@ -94,7 +103,10 @@ def test_result_roundtrip(client):
         files={"file": ("cv.txt", b"Jane Doe\nPython, 3 years")},
     )
     rid = r.json()["id"]
-    got = client.get(f"/results/{rid}")
+    got = client.get(
+        f"/results/{rid}",
+        headers={"x-api-key": settings.api_key},
+    )
     assert got.status_code == 200
     body = got.json()
     assert body["id"] == rid

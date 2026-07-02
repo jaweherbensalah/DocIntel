@@ -7,11 +7,13 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # App
-    debug: bool = True
-    cors_origins: List[str] = ["*"]
+    debug: bool = False
+    # No cross-origin browser access unless explicitly configured per environment.
+    cors_origins: List[str] = []
 
-    # Auth
-    api_key: str = "dev-secret-key-change-me"
+    # Auth — REQUIRED. There is deliberately no default so the app refuses to
+    # start unless an API key is supplied via the environment (fail closed).
+    api_key: str
 
     # LLM
     llm_provider: str = "fake"  # "fake" | "openai"

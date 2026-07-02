@@ -245,3 +245,55 @@ The generated docs now match real behaviour and are self-sufficient.
 #   Swagger UI:   http://localhost:8000/docs
 #   Raw schema:   http://localhost:8000/openapi.json
 ```
+
+---
+
+## Ticket 2 — The authentication is unsafe
+
+### What was wrong
+
+Treating the service as internet-facing and handling personal data (CVs), the
+starter had five concrete flaws:
+
+1. **Hardcoded secret.** `api_key` defaulted to `"dev-secret-key-change-me"` in
+   source — a working password baked into the code.
+2. **Broken access control.** `GET /results/{id}` had no auth at all, so anyone
+   could read any stored CV/profile by id.
+3. **Timing-unsafe comparison.** `x_api_key != settings.api_key` short-circuits,
+   leaking the key one character at a time via response timing.
+4. **Unsafe CORS.** `allow_origins=["*"]` together with
+   `allow_credentials=True` — an invalid, unsafe combination.
+5. **Path traversal.** Uploads were saved under the raw client filename, so
+   `../../…` could escape the uploads directory.
+
+### What we changed
+
+- **Secret from the environment, fail closed.** `api_key` has **no default**;
+  the app refuses to start unless `API_KEY` is supplied. A dev fallback lives
+  only in `docker-compose.yml` (`${API_KEY:-…}`), never in the app source.
+- **Auth on `/results`.** Added `Depends(check_auth)` and documented its `401`.
+- **Constant-time check.** `secrets.compare_digest(...)` (and reject a missing
+  key) so comparison time no longer depends on the key.
+- **Safe CORS.** `allow_credentials=False` (we authenticate with a header, not
+  cookies) and `cors_origins` defaults to empty.
+- **Filename sanitised.** `os.path.basename(...)` strips directory components
+  before writing an upload.
+- **`debug` off by default** so SQL echo cannot leak document contents to logs.
+
+### Why this approach (trade-offs)
+
+- **Fail closed vs. convenience.** Requiring the key means a bare `python`
+  process with no env will not boot. That is intentional for a service handling
+  personal data; `docker compose up` still works because compose provides a dev
+  key, and `.env.example` documents it.
+- **Scope.** This is per-key auth for a single trusted client. Per-client
+  credentials and tenant isolation are **Ticket 14**; rate/budget limits are
+  **Ticket 12** — deliberately out of scope here.
+
+### How to verify
+
+```bash
+pytest -q
+# includes test_results_requires_auth (401 without a key) plus the existing
+# extract/match auth checks.
+```

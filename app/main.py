@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import secrets
 import uuid
 from contextlib import asynccontextmanager
 
@@ -81,14 +82,15 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 def check_auth(x_api_key: str = Header(default=None, description="Client API key.")):
-    if x_api_key != settings.api_key:
+    # Constant-time comparison to avoid leaking the key via response timing.
+    if not x_api_key or not secrets.compare_digest(x_api_key, settings.api_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid api key"
         )
@@ -132,7 +134,10 @@ async def extract(
     # keep a copy of the upload around so we can debug extractions
     try:
         os.makedirs(UPLOAD_DIR, exist_ok=True)
-        with open(os.path.join(UPLOAD_DIR, file.filename), "wb") as f:
+        # Strip any directory components from the client-supplied filename so a
+        # name like "../../etc/passwd" cannot escape the uploads directory.
+        safe_name = os.path.basename(file.filename or "upload")
+        with open(os.path.join(UPLOAD_DIR, safe_name), "wb") as f:
             f.write(content)
     except Exception as e:
         logger.warning("could not save upload: %s", e)
@@ -179,10 +184,11 @@ async def match(body: MatchRequest, _=Depends(check_auth)):
     tags=["profiles"],
     summary="Fetch a previously stored result",
     responses={
+        401: {"model": ErrorResponse, "description": "Missing or invalid API key."},
         404: {"model": ErrorResponse, "description": "No result exists with that id."},
     },
 )
-async def get_result(rid: str):
+async def get_result(rid: str, _=Depends(check_auth)):
     obj = await session.get(Result, rid)
     if obj is None:
         raise HTTPException(status_code=404, detail="result not found")

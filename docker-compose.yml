@@ -4,9 +4,11 @@ services:
     ports:
       - "8000:8000"
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://docintel:docintel@db:5432/docintel
+      API_KEY: ${API_KEY:-dev-local-key-change-me}
     depends_on:
       db:
         condition: service_healthy
