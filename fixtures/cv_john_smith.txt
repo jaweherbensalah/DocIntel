@@ -1,0 +1,18 @@
+John Smith
+Frontend Developer — Lyon, France
+john.smith@example.com
+
+SUMMARY
+Frontend developer with 3 years of experience building web applications.
+Some exposure to backend work.
+
+SKILLS
+TypeScript, React, JavaScript, HTML, CSS, REST, Python, SQL
+
+EXPERIENCE
+Initech — Frontend Developer (2021–present)
+- Built React dashboards and integrated REST APIs.
+- Wrote a few small Python scripts for data cleanup.
+
+EDUCATION
+BSc Computer Science

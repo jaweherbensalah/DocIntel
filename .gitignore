@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Environment / secrets
+.env
+
+# Database files
+*.db
+
+# Pytest
+.pytest_cache/
+
+# Uploads (runtime artifact)
+uploads/

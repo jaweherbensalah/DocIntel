@@ -1,0 +1,11 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+sqlalchemy[asyncio]==2.0.31
+asyncpg==0.30.0
+aiosqlite==0.20.0  # used by the test suite
+pydantic==2.8.2
+pydantic-settings==2.3.4
+python-multipart==0.0.9
+openai==1.35.0
+pytest==8.2.2
+httpx==0.27.0

@@ -1,0 +1,24 @@
+Jane Doe
+Senior Backend Engineer — Paris, France
+jane.doe@example.com · +33 6 12 34 56 78
+
+SUMMARY
+Backend engineer with 7 years of experience building and operating Python
+services in the cloud. Comfortable owning a service end to end, from API design
+to Kubernetes deployment.
+
+SKILLS
+Python, FastAPI, Celery, Redis, PostgreSQL, Docker, Kubernetes, nginx,
+GitHub Actions, pytest, Linux
+
+EXPERIENCE
+Acme AI — Backend Engineer (2020–present)
+- Built an async document-processing API (FastAPI + Celery + Redis) handling
+  ~50k documents/day.
+- Containerised services and deployed them to Kubernetes with GitHub Actions.
+
+Globex — Software Engineer (2017–2020)
+- Maintained a Django monolith and migrated parts of it to microservices.
+
+EDUCATION
+MSc Computer Science

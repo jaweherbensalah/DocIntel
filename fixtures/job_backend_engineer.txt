@@ -1,0 +1,16 @@
+Backend / Cloud Engineer
+
+We are looking for a backend engineer to build and operate our AI-powered
+services.
+
+Requirements:
+- Strong Python and FastAPI
+- Asynchronous / long-running task processing (Celery, Redis)
+- PostgreSQL
+- Docker and Kubernetes
+- CI/CD with GitHub Actions
+- nginx
+
+Nice to have:
+- Experience with LLM-based pipelines
+- pytest and a solid testing culture
