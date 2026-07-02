@@ -1,0 +1,39 @@
+# Version control
+.git
+.gitignore
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# Tests & local databases (not needed in the shipped image)
+tests/
+.pytest_cache/
+*.db
+
+# Runtime artifacts
+uploads/
+
+# Secrets & local env
+.env
+
+# Editor / IDE
+.idea/
+.vscode/
+
+# Docs & compose (not needed inside the image)
+README.md
+SUBJECT.md
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# Sample data (used from the host, not shipped in the image)
+fixtures/
