@@ -1,0 +1,130 @@
+name: CI
+
+# A pipeline you'd trust to ship this service:
+#   1. test         — run the unit/integration suite on every push and PR.
+#   2. build-smoke  — build the image and prove the whole stack boots and
+#                     serves a real request via docker compose.
+#   3. publish      — push the image to GHCR, but only on main / version tags.
+#
+# (Image vulnerability scanning + provenance are Ticket 18 and deliberately not
+#  duplicated here.)
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  pull_request:
+    branches: ["main"]
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        # The suite runs fully offline (SQLite + Celery eager + fake LLM).
+        env:
+          API_KEY: ci-test-key
+        run: python -m pytest -q
+
+  build-smoke:
+    name: Build image + compose smoke test
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t docintel:ci .
+
+      - name: Bring up the stack
+        env:
+          API_KEY: ci-smoke-key
+        run: docker compose up -d --build
+
+      - name: Wait for the API to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fs localhost:8000/health; then echo "healthy"; exit 0; fi
+            sleep 2
+          done
+          echo "API did not become healthy" >&2
+          docker compose logs
+          exit 1
+
+      - name: Smoke test — extract round trip
+        env:
+          API_KEY: ci-smoke-key
+        run: |
+          set -euo pipefail
+          id=$(curl -fs -X POST localhost:8000/extract \
+                 -H "x-api-key: $API_KEY" \
+                 -F "file=@fixtures/cv_jane_doe.txt" | python -c "import sys,json;print(json.load(sys.stdin)['id'])")
+          echo "job id: $id"
+          for i in $(seq 1 30); do
+            status=$(curl -fs localhost:8000/results/$id -H "x-api-key: $API_KEY" \
+                       | python -c "import sys,json;print(json.load(sys.stdin)['status'])")
+            echo "status: $status"
+            if [ "$status" = "done" ]; then exit 0; fi
+            if [ "$status" = "failed" ]; then echo "extraction failed" >&2; exit 1; fi
+            sleep 2
+          done
+          echo "extraction did not complete" >&2
+          docker compose logs worker
+          exit 1
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  publish:
+    name: Publish image to GHCR
+    runs-on: ubuntu-latest
+    needs: build-smoke
+    # Only publish from the main branch or a version tag, never from PRs.
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

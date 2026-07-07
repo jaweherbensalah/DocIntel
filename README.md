@@ -60,6 +60,12 @@ curl -s http://localhost:8000/results/<id> -H "x-api-key: $API_KEY"
 ```bash
 pytest
 ```
+## CI/CD
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on every push and PR: it runs
+the test suite, then builds the image and smoke-tests the full stack via
+`docker compose` (a real `/extract` → `/results` round trip). On pushes to
+`main` or a `v*` tag it also publishes the image to GHCR.
 
 ## Notes
 

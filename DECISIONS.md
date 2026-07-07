@@ -396,3 +396,47 @@ input order on ties), and stores the result like any other
 ```bash
 pytest -q   # test_batch_match_ranks_candidates asserts best-first ordering
 ```
+
+---
+
+## Ticket 10 — Ship it with CI/CD
+
+### What we added
+
+A GitHub Actions pipeline (`.github/workflows/ci.yml`) with three stages that
+gate each other:
+
+1. **test** — installs deps and runs the suite on every push and PR. The suite
+   is fully offline (SQLite + Celery eager + fake LLM), so no services or
+   secrets are needed.
+2. **build-smoke** — builds the image, then brings up the full stack with
+   `docker compose` and proves it works: waits for `/health`, then runs a real
+   `POST /extract` → poll `GET /results/{id}` round trip through Redis and the
+   worker. This is exactly the ground-rule acceptance ("`docker compose up`
+   must work") enforced in CI.
+3. **publish** — pushes the image to GHCR, tagged by branch, semver and commit
+   SHA. Runs **only** on pushes to `main` or `v*` tags, never on PRs.
+
+### Why this shape
+
+- **Stages gate each other** (`needs:`), so we never publish an image that
+  failed tests or couldn't boot.
+- **The smoke test exercises the real async path** (queue + worker), not just a
+  unit import — it's the highest-signal check that a release is shippable.
+- **Publish is guarded** by `if: github.event_name == 'push'` and least-
+  privilege `packages: write` permissions, so fork PRs can't push images.
+- **`concurrency` cancels superseded runs** to save CI minutes.
+- **Kept lean** — no multi-version test matrix and no image vulnerability
+  scanning/provenance here; that supply-chain hardening is Ticket 18 and would
+  be duplicated effort if added now.
+
+### How to verify
+
+Push to a branch and open a PR: the `test` and `build-smoke` jobs run. Merge to
+`main`: `publish` additionally pushes `ghcr.io/<owner>/docintel`. Locally you can
+reproduce the smoke test with:
+
+```bash
+API_KEY=ci-smoke-key docker compose up -d --build
+curl -fs localhost:8000/health
+```
