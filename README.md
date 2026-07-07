@@ -37,6 +37,15 @@ It uses a fake LLM by default so it works offline. To use a real model, set
 
 All endpoints except `/health` require an `x-api-key` header.
 
+## Observability
+
+- **Logs** are structured JSON with a `request_id` on every line (API and worker).
+- **Metrics** (Prometheus): `GET /metrics` on the API (port 8000) and the worker
+  metrics server (port 9100) expose HTTP and Celery task counters/histograms.
+- **Correlation**: each response carries an `X-Request-ID` (accepted from the
+  client if supplied); the same id flows into the worker, so a single request
+  can be traced across the API and the queue in the logs.
+
 ## Examples
 
 ```bash

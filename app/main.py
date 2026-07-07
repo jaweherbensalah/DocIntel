@@ -11,6 +11,7 @@ from fastapi import (
     File,
     Header,
     HTTPException,
+    Response,
     UploadFile,
     status,
 )
@@ -21,6 +22,12 @@ from app.config import settings
 from app.db import engine, get_session
 from app.llm import get_provider
 from app.models import Base, Result
+from app.observability import (
+    configure_logging,
+    render_metrics,
+    request_context_middleware,
+    request_id_var,
+)
 from app.schemas import (
     BatchMatchRequest,
     BatchMatchResponse,
@@ -34,7 +41,7 @@ from app.schemas import (
 )
 from app.tasks import extract_profile
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 logger = logging.getLogger("docintel")
 
 UPLOAD_DIR = "uploads"
@@ -92,6 +99,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Correlation id + per-request logging and HTTP metrics.
+app.middleware("http")(request_context_middleware)
+
+
+@app.get(
+    "/metrics",
+    tags=["system"],
+    summary="Prometheus metrics",
+    include_in_schema=False,
+)
+async def metrics():
+    data, content_type = render_metrics()
+    return Response(content=data, media_type=content_type)
 
 
 def check_auth(x_api_key: str = Header(default=None, description="Client API key.")):
@@ -154,7 +175,12 @@ async def extract(
     session.add(Result(id=rid, kind="extract", status="pending", payload=None))
     await session.commit()
 
-    extract_profile.delay(rid, text)
+    # Propagate the request id so the worker's logs correlate with this request.
+    extract_profile.delay(rid, text, request_id_var.get())
+    logger.info(
+        "extraction enqueued",
+        extra={"extra_fields": {"rid": rid, "bytes": len(content)}},
+    )
 
     return ExtractAcceptedResponse(id=rid, status="pending")
 

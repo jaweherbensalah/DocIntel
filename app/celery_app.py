@@ -8,6 +8,7 @@ both the broker (the queue itself) and the result backend.
 from celery import Celery
 
 from app.config import settings
+from app.observability import setup_worker_observability
 
 celery_app = Celery(
     "docintel",
@@ -26,3 +27,6 @@ celery_app.conf.update(
     # Report a "started" state so clients/monitoring can see work in progress.
     task_track_started=True,
 )
+
+# Structured logging, task metrics and the worker metrics server.
+setup_worker_observability()

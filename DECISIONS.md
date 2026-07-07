@@ -440,3 +440,54 @@ reproduce the smoke test with:
 API_KEY=ci-smoke-key docker compose up -d --build
 curl -fs localhost:8000/health
 ```
+----
+
+## Ticket 7 — Make it observable
+
+### What we added
+
+Three pillars, all in `app/observability.py`:
+
+1. **Structured logging** — every log line is JSON (`ts`, `level`, `logger`,
+   `msg`, `request_id`, plus any structured `extra_fields`). Machine-parseable
+   for any log stack (Loki, ELK, CloudWatch) with no regex.
+2. **Metrics** — Prometheus counters/histograms for HTTP requests
+   (`http_requests_total`, `http_request_duration_seconds`) and Celery tasks
+   (`celery_tasks_total`, `celery_task_duration_seconds`). Scraped from
+   `GET /metrics` on the API and a metrics HTTP server on the worker (port 9100).
+3. **Correlation** — an `X-Request-ID` is generated (or accepted from the
+   client) at the edge, bound to a `ContextVar`, echoed back in the response,
+   and **propagated into the Celery task** so worker logs carry the same id.
+   One request can be followed API → queue → worker in the logs.
+
+### Why this shape
+
+- **Request id as a `ContextVar`** means the id is available to every log call
+  without threading it through function signatures, and it survives across the
+  async request and into the sync task (passed explicitly as a task argument).
+- **Route template as the metric label** (`/results/{rid}`, not the raw id)
+  keeps Prometheus label cardinality bounded.
+- **Worker metrics use `prometheus_client` multiprocess mode**
+  (`PROMETHEUS_MULTIPROC_DIR`) so counters are aggregated correctly across the
+  worker's prefork child processes rather than showing only one child's view.
+- **`/metrics` is unauthenticated** — that's the Prometheus convention; it
+  exposes no sensitive data and would normally be reachable only on the
+  internal network / scrape target, not the public ingress.
+- **Full distributed tracing (OpenTelemetry spans) is deliberately deferred to
+  Ticket 16.** This ticket delivers the logs + metrics you operate on daily;
+  request-id correlation is the pragmatic bridge until then.
+
+### How to verify
+
+```bash
+pytest -q   # asserts /metrics exposes Prometheus text and X-Request-ID is set/echoed
+```
+
+Live, against `docker compose up`:
+
+```bash
+curl -s localhost:8000/metrics | grep http_requests_total   # API metrics
+curl -s localhost:9100/metrics | grep celery_tasks_total     # worker metrics
+# JSON logs with a shared request_id across API and worker:
+docker compose logs api worker | grep <request-id-from-X-Request-ID-header>
+```

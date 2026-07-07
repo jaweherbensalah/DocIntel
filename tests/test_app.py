@@ -162,3 +162,21 @@ def test_batch_match_empty_profiles_is_422(client):
         json={"profiles": [], "job_description": "x"},
     )
     assert r.status_code == 422
+
+
+def test_metrics_endpoint_exposes_prometheus(client):
+    # Generate at least one request so a counter sample exists.
+    client.get("/health")
+    r = client.get("/metrics")
+    assert r.status_code == 200
+    assert "http_requests_total" in r.text
+
+
+def test_response_carries_request_id(client):
+    r = client.get("/health")
+    assert r.headers.get("X-Request-ID")
+
+
+def test_incoming_request_id_is_echoed(client):
+    r = client.get("/health", headers={"x-request-id": "trace-abc-123"})
+    assert r.headers.get("X-Request-ID") == "trace-abc-123"
