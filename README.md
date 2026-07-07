@@ -11,7 +11,8 @@ The easy way — brings up the API and its Postgres database:
 docker compose up --build
 ```
 
-The API is then on http://localhost:8000.
+The API is then on http://localhost:8000. Requests need an `x-api-key` header;
+compose sets a development key (`dev-local-key-change-me`) by default.
 
 To run it without Docker you need a Postgres reachable at `DATABASE_URL`
 (see `docker-compose.yml`), then:
@@ -26,10 +27,13 @@ It uses a fake LLM by default so it works offline. To use a real model, set
 
 ## Endpoints
 
-- `POST /extract` — upload a CV file, get back a profile
-- `POST /match` — send a profile + job description, get a score
-- `GET /results/{id}` — fetch a previous result
+- `POST /extract` — upload a CV file; returns `202` with a job `id` and
+  `status: pending`. Extraction runs in the background on a Celery worker.
+- `GET /results/{id}` — poll until `status` is `done`, then read the `profile`.
+- `POST /match` — send a profile + job description, get a score.
 - `GET /health`
+
+All endpoints except `/health` require an `x-api-key` header.
 
 ## Examples
 
@@ -44,6 +48,9 @@ curl -s -X POST http://localhost:8000/match \
   -H "x-api-key: $API_KEY" \
   -H "content-type: application/json" \
   -d '{"profile": {"skills": ["python", "fastapi"]}, "job_description": "Python FastAPI Kubernetes"}'
+
+# poll for an async extract result
+curl -s http://localhost:8000/results/<id> -H "x-api-key: $API_KEY"
 ```
 
 ## Tests
@@ -54,5 +61,10 @@ pytest
 
 ## Notes
 
-- Data is stored in Postgres (see `docker-compose.yml`).
+- Extraction runs asynchronously on a Celery worker (Redis broker), so the API
+  stays responsive; `POST /extract` returns immediately and you poll `/results`.
+- Data is stored in Postgres, each result with a `status`
+  (`pending`/`done`/`failed`).
+- If you ran an older version, reset the DB volume after the schema change:
+  `docker compose down -v`.
 - Uploaded files are kept under `uploads/` for debugging.

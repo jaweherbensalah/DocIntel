@@ -24,5 +24,8 @@ class Settings(BaseSettings):
     # Storage
     database_url: str = "postgresql+asyncpg://docintel:docintel@localhost:5432/docintel"
 
+    # Task queue (Celery broker + result backend)
+    redis_url: str = "redis://localhost:6379/0"
+
 
 settings = Settings()

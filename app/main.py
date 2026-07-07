@@ -15,20 +15,21 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.db import engine, session
+from app.db import engine, get_session
 from app.llm import get_provider
 from app.models import Base, Result
 from app.schemas import (
     ErrorResponse,
-    ExtractResponse,
+    ExtractAcceptedResponse,
     HealthResponse,
     MatchRequest,
     MatchResponse,
-    Profile,
     ResultResponse,
 )
+from app.tasks import extract_profile
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("docintel")
@@ -40,10 +41,12 @@ API_DESCRIPTION = """
 against a job description.
 
 ### Typical flow
-1. `POST /extract` — upload a CV, receive a structured `profile` and a result `id`.
-2. `POST /match` — send a profile plus a job description, receive a `score`,
+1. `POST /extract` — upload a CV. Extraction runs in the background, so you get
+   back a result `id` and `status: "pending"` immediately (`202 Accepted`).
+2. `GET /results/{id}` — poll until `status` becomes `done`, then read the
+   extracted `profile`.
+3. `POST /match` — send a profile plus a job description, receive a `score`,
    matched/missing skills and a short rationale.
-3. `GET /results/{id}` — fetch any previously stored extract or match result.
 
 ### Authentication
 `POST /extract` and `POST /match` require an API key in the `x-api-key`
@@ -108,24 +111,22 @@ async def health():
 
 @app.post(
     "/extract",
-    response_model=ExtractResponse,
+    response_model=ExtractAcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
     tags=["profiles"],
-    summary="Extract a structured profile from a CV",
+    summary="Submit a CV for asynchronous extraction",
     responses={
         401: {"model": ErrorResponse, "description": "Missing or invalid API key."},
         422: {
             "model": ErrorResponse,
             "description": "The uploaded file was empty or unreadable.",
         },
-        502: {
-            "model": ErrorResponse,
-            "description": "The extraction provider failed.",
-        },
     },
 )
 async def extract(
     file: UploadFile = File(..., description="CV document to process (UTF-8 text)."),
     _=Depends(check_auth),
+    session: AsyncSession = Depends(get_session),
 ):
     content = await file.read()
     if not content:
@@ -144,16 +145,15 @@ async def extract(
 
     text = content.decode("utf-8", errors="ignore")
 
-    try:
-        profile = get_provider().extract(text)
-    except Exception:
-        logger.exception("extraction provider failed")
-        raise HTTPException(status_code=502, detail="extraction provider failed")
-
+    # Record the job as pending, then hand the heavy work to a background
+    # worker and return immediately instead of blocking the request.
     rid = uuid.uuid4().hex
-    session.add(Result(id=rid, kind="extract", payload=json.dumps(profile)))
+    session.add(Result(id=rid, kind="extract", status="pending", payload=None))
     await session.commit()
-    return ExtractResponse(id=rid, profile=Profile(**profile))
+
+    extract_profile.delay(rid, text)
+
+    return ExtractAcceptedResponse(id=rid, status="pending")
 
 
 @app.post(
@@ -169,11 +169,15 @@ async def extract(
         },
     },
 )
-async def match(body: MatchRequest, _=Depends(check_auth)):
+async def match(
+    body: MatchRequest,
+    _=Depends(check_auth),
+    session: AsyncSession = Depends(get_session),
+):
     result = get_provider().match(body.profile.model_dump(), body.job_description)
 
     rid = uuid.uuid4().hex
-    session.add(Result(id=rid, kind="match", payload=json.dumps(result)))
+    session.add(Result(id=rid, kind="match", status="done", payload=json.dumps(result)))
     await session.commit()
     return MatchResponse(id=rid, **result)
 
@@ -188,8 +192,13 @@ async def match(body: MatchRequest, _=Depends(check_auth)):
         404: {"model": ErrorResponse, "description": "No result exists with that id."},
     },
 )
-async def get_result(rid: str, _=Depends(check_auth)):
+async def get_result(
+    rid: str,
+    _=Depends(check_auth),
+    session: AsyncSession = Depends(get_session),
+):
     obj = await session.get(Result, rid)
     if obj is None:
         raise HTTPException(status_code=404, detail="result not found")
-    return ResultResponse(id=obj.id, kind=obj.kind, result=json.loads(obj.payload))
+    result = json.loads(obj.payload) if obj.payload else None
+    return ResultResponse(id=obj.id, kind=obj.kind, status=obj.status, result=result)

@@ -8,10 +8,37 @@ services:
         required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://docintel:docintel@db:5432/docintel
+      REDIS_URL: redis://redis:6379/0
       API_KEY: ${API_KEY:-dev-local-key-change-me}
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://docintel:docintel@db:5432/docintel
+      REDIS_URL: redis://redis:6379/0
+      API_KEY: ${API_KEY:-dev-local-key-change-me}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   db:
     image: postgres:16

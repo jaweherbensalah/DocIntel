@@ -297,3 +297,73 @@ pytest -q
 # includes test_results_requires_auth (401 without a key) plus the existing
 # extract/match auth checks.
 ```
+
+---
+
+## Ticket 1 — The pipeline doesn't scale
+
+### What was wrong
+
+`POST /extract` ran the model **inline**, inside the request: read file → run
+extraction (a blocking `sleep`/model call) → save → respond. A single slow
+document tied up a web worker for the whole duration, so the service buckled
+under load. (The fake provider even used a blocking `time.sleep`, freezing the
+whole async event loop.)
+
+### What we changed
+
+We moved the heavy work onto a **task queue**:
+
+- **`POST /extract`** now records a `pending` result, enqueues a Celery job, and
+  returns **`202 Accepted`** with the `id` immediately — it no longer runs the
+  model on the request path.
+- A **Celery worker** (`app/tasks.py`, `app/celery_app.py`) consumes the job,
+  runs the extraction, and updates the row to `done` (or `failed`).
+- **`GET /results/{id}`** now reports `status` (`pending`/`done`/`failed`) plus
+  the `result` once ready — the client polls it.
+- **Redis** is the broker (and result backend); a `worker` service was added to
+  `docker-compose.yml` alongside `redis`.
+
+Supporting changes:
+
+- **Per-request DB sessions** (`get_session` in `app/db.py`). The starter shared
+  one global session for the whole app, which returns cached/stale rows — so a
+  later read would never see `pending` flip to `done`. A fresh session per
+  request fixes that and is safe under concurrency.
+- **`Result.status`** column added; `payload` is now nullable (null until done).
+- **Sync engine for the worker** (`app/sync_db.py`): Celery tasks are
+  synchronous, so they use a psycopg2 engine derived from the same
+  `DATABASE_URL`, rather than the API's async engine.
+
+### How we manage the queue (this is the part that matters)
+
+- **`task_acks_late=True`** — a job is acknowledged only *after* it finishes, so
+  if a worker crashes mid-job the job is redelivered instead of lost.
+- **`worker_prefetch_multiplier=1`** — each worker slot holds one job at a time,
+  so a slow job can't block a batch it greedily prefetched.
+- **Retries** — the task retries (bounded) on failure and marks the row
+  `failed` when exhausted.
+
+### Why this approach (trade-offs)
+
+- **Only `/extract` is queued.** It is the heavy, upload-triggered path the
+  ticket calls out. `/match` operates on an already-small profile and is left
+  synchronous; it could adopt the identical pattern if needed. (Avoiding
+  gold-plating.)
+- **Polling, not push.** `GET /results/{id}` polling is the simplest correct
+  contract; SSE/webhooks are noted as a later enhancement.
+- **Schema change needs a volume reset.** Because there are no migrations yet
+  (that is Ticket 11), an existing Postgres volume must be reset once:
+  `docker compose down -v`.
+
+### How to verify
+
+```bash
+# Unit/integration (Celery runs eagerly in-process, no broker needed):
+pytest -q          # extract returns 202 pending, then results shows done
+
+# End to end:
+docker compose down -v && docker compose up --build
+# POST /extract -> 202 {id, status: pending}
+# GET  /results/{id} -> {status: done, result: {...}} once the worker finishes
+```

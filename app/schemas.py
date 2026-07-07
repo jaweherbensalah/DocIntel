@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -33,6 +33,25 @@ class ExtractResponse(BaseModel):
         examples=["a1b2c3d4e5f6"],
     )
     profile: Profile
+
+
+class ExtractAcceptedResponse(BaseModel):
+    """Response body returned by ``POST /extract`` (202 Accepted).
+
+    Extraction runs in the background; poll ``GET /results/{id}`` until the
+    status becomes ``done``.
+    """
+
+    id: str = Field(
+        ...,
+        description="Result id; poll GET /results/{id} until status is 'done'.",
+        examples=["a1b2c3d4e5f6"],
+    )
+    status: str = Field(
+        default="pending",
+        description="Processing status of the job.",
+        examples=["pending"],
+    )
 
 
 class MatchRequest(BaseModel):
@@ -78,7 +97,15 @@ class ResultResponse(BaseModel):
     kind: str = Field(
         ..., description="The kind of result: 'extract' or 'match'.", examples=["extract"]
     )
-    result: dict = Field(..., description="The stored result payload.")
+    status: str = Field(
+        ...,
+        description="Processing status: 'pending', 'done' or 'failed'.",
+        examples=["done"],
+    )
+    result: Optional[dict] = Field(
+        default=None,
+        description="The stored result payload; null until status is 'done'.",
+    )
 
 
 class HealthResponse(BaseModel):

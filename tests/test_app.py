@@ -9,9 +9,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import settings
+from app.celery_app import celery_app
 from app.main import app
 
 settings.llm_latency = 0  # don't wait for the fake model in tests
+
+# Run Celery tasks inline (no broker/worker needed) so tests stay self-contained.
+celery_app.conf.task_always_eager = True
+celery_app.conf.task_eager_propagates = True
 
 
 @pytest.fixture(scope="module")
@@ -29,14 +34,21 @@ def test_extract_requires_auth(client):
     assert r.status_code == 401
 
 
-def test_extract_ok(client):
+def test_extract_accepts_and_completes(client):
     r = client.post(
         "/extract",
         headers={"x-api-key": settings.api_key},
         files={"file": ("cv.txt", b"Jane Doe\nPython and FastAPI, 5 years")},
     )
-    assert r.status_code == 200
-    assert "python" in r.json()["profile"]["skills"]
+    assert r.status_code == 202
+    assert r.json()["status"] == "pending"
+    rid = r.json()["id"]
+    # Celery runs eagerly in tests, so the extraction has already finished.
+    got = client.get(f"/results/{rid}", headers={"x-api-key": settings.api_key})
+    assert got.status_code == 200
+    body = got.json()
+    assert body["status"] == "done"
+    assert "python" in body["result"]["skills"]
 
 
 def test_match_ok(client):
@@ -111,4 +123,5 @@ def test_result_roundtrip(client):
     body = got.json()
     assert body["id"] == rid
     assert body["kind"] == "extract"
+    assert body["status"] == "done"
     assert "python" in body["result"]["skills"]
