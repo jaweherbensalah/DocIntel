@@ -90,6 +90,47 @@ class MatchResponse(BaseModel):
     )
 
 
+class BatchMatchRequest(BaseModel):
+    """Request body for ``POST /batch-match``."""
+
+    profiles: List[Profile] = Field(
+        ...,
+        min_length=1,
+        description="Candidate profiles to score against the job description.",
+    )
+    job_description: str = Field(
+        ...,
+        min_length=1,
+        description="Free-text job description to score every profile against.",
+        examples=["Senior Python engineer with FastAPI and Kubernetes experience."],
+    )
+
+
+class ShortlistEntry(BaseModel):
+    """One ranked candidate in a batch-match shortlist."""
+
+    rank: int = Field(..., ge=1, description="1-based rank, best match first.")
+    name: str = Field(..., description="Candidate name.", examples=["Jane Doe"])
+    score: int = Field(..., ge=0, le=100, description="Match score, 0-100.")
+    matched_skills: List[str] = Field(default_factory=list)
+    missing_skills: List[str] = Field(default_factory=list)
+    rationale: str
+
+
+class BatchMatchResponse(BaseModel):
+    """Response body returned by ``POST /batch-match``: a ranked shortlist."""
+
+    id: str = Field(
+        ...,
+        description="Result id; pass to GET /results/{id} to retrieve it later.",
+        examples=["a1b2c3d4e5f6"],
+    )
+    job_description: str
+    shortlist: List[ShortlistEntry] = Field(
+        ..., description="Candidates ranked by score, best first."
+    )
+
+
 class ResultResponse(BaseModel):
     """A previously stored extract or match result."""
 

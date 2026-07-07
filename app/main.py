@@ -22,12 +22,15 @@ from app.db import engine, get_session
 from app.llm import get_provider
 from app.models import Base, Result
 from app.schemas import (
+    BatchMatchRequest,
+    BatchMatchResponse,
     ErrorResponse,
     ExtractAcceptedResponse,
     HealthResponse,
     MatchRequest,
     MatchResponse,
     ResultResponse,
+    ShortlistEntry,
 )
 from app.tasks import extract_profile
 
@@ -180,6 +183,58 @@ async def match(
     session.add(Result(id=rid, kind="match", status="done", payload=json.dumps(result)))
     await session.commit()
     return MatchResponse(id=rid, **result)
+
+
+@app.post(
+    "/batch-match",
+    response_model=BatchMatchResponse,
+    tags=["matching"],
+    summary="Score many profiles against one job description",
+    responses={
+        401: {"model": ErrorResponse, "description": "Missing or invalid API key."},
+        422: {
+            "model": ErrorResponse,
+            "description": "The request body failed validation.",
+        },
+    },
+)
+async def batch_match(
+    body: BatchMatchRequest,
+    _=Depends(check_auth),
+    session: AsyncSession = Depends(get_session),
+):
+    provider = get_provider()
+    scored = [
+        (profile, provider.match(profile.model_dump(), body.job_description))
+        for profile in body.profiles
+    ]
+    # Rank best-first; Python's sort is stable, so ties keep input order.
+    scored.sort(key=lambda pair: pair[1]["score"], reverse=True)
+
+    shortlist = [
+        ShortlistEntry(
+            rank=i + 1,
+            name=profile.name or "Unknown",
+            score=result["score"],
+            matched_skills=result["matched_skills"],
+            missing_skills=result["missing_skills"],
+            rationale=result["rationale"],
+        )
+        for i, (profile, result) in enumerate(scored)
+    ]
+
+    rid = uuid.uuid4().hex
+    payload = {
+        "job_description": body.job_description,
+        "shortlist": [entry.model_dump() for entry in shortlist],
+    }
+    session.add(
+        Result(id=rid, kind="batch_match", status="done", payload=json.dumps(payload))
+    )
+    await session.commit()
+    return BatchMatchResponse(
+        id=rid, job_description=body.job_description, shortlist=shortlist
+    )
 
 
 @app.get(

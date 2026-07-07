@@ -31,6 +31,8 @@ It uses a fake LLM by default so it works offline. To use a real model, set
   `status: pending`. Extraction runs in the background on a Celery worker.
 - `GET /results/{id}` — poll until `status` is `done`, then read the `profile`.
 - `POST /match` — send a profile + job description, get a score.
+- `POST /batch-match` — score many profiles against one job description; returns
+  a ranked shortlist (best first).
 - `GET /health`
 
 All endpoints except `/health` require an `x-api-key` header.

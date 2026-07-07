@@ -125,3 +125,40 @@ def test_result_roundtrip(client):
     assert body["kind"] == "extract"
     assert body["status"] == "done"
     assert "python" in body["result"]["skills"]
+
+
+def test_batch_match_ranks_candidates(client):
+    r = client.post(
+        "/batch-match",
+        headers={"x-api-key": settings.api_key},
+        json={
+            "profiles": [
+                {"name": "A", "skills": ["python"]},
+                {"name": "B", "skills": ["python", "fastapi", "kubernetes"]},
+                {"name": "C", "skills": []},
+            ],
+            "job_description": "Python FastAPI Kubernetes",
+        },
+    )
+    assert r.status_code == 200
+    shortlist = r.json()["shortlist"]
+    assert [e["name"] for e in shortlist] == ["B", "A", "C"]
+    assert [e["rank"] for e in shortlist] == [1, 2, 3]
+    assert shortlist[0]["score"] >= shortlist[1]["score"] >= shortlist[2]["score"]
+
+
+def test_batch_match_requires_auth(client):
+    r = client.post(
+        "/batch-match",
+        json={"profiles": [{"skills": []}], "job_description": "x"},
+    )
+    assert r.status_code == 401
+
+
+def test_batch_match_empty_profiles_is_422(client):
+    r = client.post(
+        "/batch-match",
+        headers={"x-api-key": settings.api_key},
+        json={"profiles": [], "job_description": "x"},
+    )
+    assert r.status_code == 422

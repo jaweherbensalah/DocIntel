@@ -367,3 +367,32 @@ docker compose down -v && docker compose up --build
 # POST /extract -> 202 {id, status: pending}
 # GET  /results/{id} -> {status: done, result: {...}} once the worker finishes
 ```
+
+---
+
+## Ticket 8 — New feature: batch matching
+
+### What we added
+
+`POST /batch-match` scores one job description against **many** candidate
+profiles and returns a **ranked shortlist** (best match first). It reuses the
+existing per-profile match logic, sorts by score (Python's stable sort keeps
+input order on ties), and stores the result like any other
+(`kind="batch_match"`), retrievable via `GET /results/{id}`.
+
+### Why this shape
+
+- **Reuses the match provider** instead of duplicating scoring logic.
+- **Typed and documented** (`BatchMatchRequest`, `BatchMatchResponse`,
+  `ShortlistEntry`) so it renders fully in the OpenAPI docs — consistent with
+  Tickets 5/6.
+- **Requires ≥1 profile** (422 on empty) and an API key, consistent with the
+  rest of the API.
+- **Kept synchronous.** Scoring is cheap string work; if profiles were scored by
+  a real LLM, this would move onto the Celery queue exactly like `/extract`.
+
+### How to verify
+
+```bash
+pytest -q   # test_batch_match_ranks_candidates asserts best-first ordering
+```
