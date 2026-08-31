@@ -1,0 +1,33 @@
+# Non-secret configuration shared by the API and the worker.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: docintel-config
+  namespace: docintel
+  labels:
+    app.kubernetes.io/part-of: docintel
+data:
+  REDIS_URL: "redis://redis:6379/0"
+  LLM_PROVIDER: "fake"
+  LLM_LATENCY: "2.0"
+  # prometheus_client needs a writable dir to aggregate metrics across the
+  # worker's prefork children; the pod mounts an emptyDir at /tmp for it.
+  PROMETHEUS_MULTIPROC_DIR: "/tmp/prometheus_multiproc"
+  WORKER_METRICS_PORT: "9100"
+---
+# Placeholder values only. In a real cluster this object is not committed —
+# it comes from Sealed Secrets / External Secrets / the cloud secret manager.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: docintel-secret
+  namespace: docintel
+  labels:
+    app.kubernetes.io/part-of: docintel
+type: Opaque
+stringData:
+  API_KEY: "replace-me-before-deploying"
+  POSTGRES_USER: "docintel"
+  POSTGRES_PASSWORD: "replace-me-before-deploying"
+  POSTGRES_DB: "docintel"
+  DATABASE_URL: "postgresql+asyncpg://docintel:replace-me-before-deploying@postgres:5432/docintel"

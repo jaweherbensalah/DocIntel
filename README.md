@@ -76,6 +76,15 @@ the test suite, then builds the image and smoke-tests the full stack via
 `docker compose` (a real `/extract` → `/results` round trip). On pushes to
 `main` or a `v*` tag it also publishes the image to GHCR.
 
+## Kubernetes
+
+Manifests for the API, worker, Postgres and Redis live in `k8s/`. See
+[k8s/README.md](k8s/README.md) for the kind/minikube walkthrough.
+
+```bash
+kubectl apply -f k8s/
+```
+
 ## Notes
 
 - Extraction runs asynchronously on a Celery worker (Redis broker), so the API

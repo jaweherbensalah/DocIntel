@@ -1,0 +1,48 @@
+# The datastores hold personal data (CVs) and the job queue. Without a policy,
+# any pod in the cluster can reach them, so restrict them to this app's pods.
+# Requires a CNI that enforces NetworkPolicy (Calico, Cilium). kind's default
+# kindnet does not enforce it — the manifests still apply cleanly, the rules
+# are simply not policed there.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-allow-app-only
+  namespace: docintel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: database
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: api
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: worker
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-allow-app-only
+  namespace: docintel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: broker
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: api
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: worker
+      ports:
+        - protocol: TCP
+          port: 6379

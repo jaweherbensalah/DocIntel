@@ -491,3 +491,50 @@ curl -s localhost:9100/metrics | grep celery_tasks_total     # worker metrics
 # JSON logs with a shared request_id across API and worker:
 docker compose logs api worker | grep <request-id-from-X-Request-ID-header>
 ```
+
+## Ticket 9 — Deploy it to Kubernetes
+
+### What we added
+
+Plain manifests under `k8s/`, applied in filename order: namespace, config +
+secret, Postgres (StatefulSet + PVC), Redis, the API Deployment + Service, the
+Celery worker Deployment, and NetworkPolicies. `k8s/README.md` documents the
+kind/minikube walkthrough.
+
+### Why this shape
+
+- **Plain YAML, not Helm.** There is one environment and one chart's worth of
+  config here; a chart would add indirection without removing duplication.
+- **Postgres is a StatefulSet with a PVC, Redis is a Deployment.** The database
+  is durable state; the queue is rebuildable. Treating them the same would be
+  wrong in both directions.
+- **Security defaults on every pod**: non-root, `readOnlyRootFilesystem`,
+  `allowPrivilegeEscalation: false`, all capabilities dropped, with explicit
+  `emptyDir` mounts for the few writable paths the processes actually need.
+  This matters because the image runs client-supplied documents.
+- **NetworkPolicies limit Postgres and Redis to the API and worker pods.** The
+  data is personal (CVs); "anything in the cluster can reach the database" is
+  not an acceptable default. Noted in the README that kind's default CNI does
+  not enforce these.
+- **Probes match how each process actually fails.** The API gets a
+  `startupProbe` so slow first-boot table creation isn't mistaken for a hang;
+  the worker serves no HTTP, so its liveness is a Celery `inspect ping`.
+- **`terminationGracePeriodSeconds: 60` on the worker** pairs with the existing
+  `task_acks_late`, so a rolling deploy finishes in-flight work instead of
+  relying on redelivery.
+
+Deliberately out of scope, and called out in `k8s/README.md` rather than left
+silent: schema migrations as a pre-deploy `Job` (Ticket 11), queue-depth
+autoscaling (Ticket 15), and an Ingress with TLS (environment-specific).
+
+### How to verify
+
+No cluster is required to evaluate them:
+
+```bash
+kubectl apply --dry-run=client -f k8s/
+kubeconform -strict -summary k8s/
+```
+
+On a local cluster, see `k8s/README.md` for the full kind walkthrough
+(`kind load docker-image` side-loads the image, so no registry is needed).
