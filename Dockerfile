@@ -41,6 +41,10 @@ COPY --from=builder /install /usr/local
 # fixtures, docs, or VCS metadata).
 COPY --from=builder /app/app ./app
 
+# Alembic discovers revisions by globbing *.py, so these ship as source.
+COPY alembic.ini ./
+COPY migrations ./migrations
+
 USER appuser
 
 EXPOSE 8000

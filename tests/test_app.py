@@ -5,7 +5,11 @@ os.environ["DATABASE_URL"] = (
 )
 os.environ["API_KEY"] = "test-key"  # required by config; set before app import
 
+from pathlib import Path
+
 import pytest
+from alembic import command
+from alembic.config import Config
 from fastapi.testclient import TestClient
 
 from app.config import settings
@@ -17,6 +21,21 @@ settings.llm_latency = 0  # don't wait for the fake model in tests
 # Run Celery tasks inline (no broker/worker needed) so tests stay self-contained.
 celery_app.conf.task_always_eager = True
 celery_app.conf.task_eager_propagates = True
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def schema():
+    """Build the test schema with the real migrations, so drift is caught here."""
+    db = ROOT / "test_docintel.db"
+    db.unlink(missing_ok=True)
+
+    cfg = Config(str(ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(cfg, "head")
+    yield
+    db.unlink(missing_ok=True)
 
 
 @pytest.fixture(scope="module")
@@ -180,3 +199,55 @@ def test_response_carries_request_id(client):
 def test_incoming_request_id_is_echoed(client):
     r = client.get("/health", headers={"x-request-id": "trace-abc-123"})
     assert r.headers.get("X-Request-ID") == "trace-abc-123"
+
+
+def test_candidates_requires_auth(client):
+    assert client.get("/candidates").status_code == 401
+
+
+def test_candidates_search_by_skill_and_experience(client):
+    client.post(
+        "/extract",
+        headers={"x-api-key": settings.api_key},
+        files={"file": ("cv.txt", b"Ana Ruiz\nPython, Docker and FastAPI, 7 years")},
+    )
+    client.post(
+        "/extract",
+        headers={"x-api-key": settings.api_key},
+        files={"file": ("cv.txt", b"Bo Lee\nJava only, 2 years")},
+    )
+
+    r = client.get(
+        "/candidates",
+        headers={"x-api-key": settings.api_key},
+        params={"skill": ["python", "docker"], "min_years": 5},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] >= 1
+    names = [c["name"] for c in body["items"]]
+    assert any("Ana Ruiz" in n for n in names)
+    assert all("Bo Lee" not in n for n in names)
+
+
+def test_candidates_requires_every_requested_skill(client):
+    # "java" alone matches Bo Lee, but not combined with "python".
+    r = client.get(
+        "/candidates",
+        headers={"x-api-key": settings.api_key},
+        params={"skill": ["java", "python"]},
+    )
+    assert r.status_code == 200
+    assert r.json()["total"] == 0
+
+
+def test_extract_result_is_served_from_normalised_tables(client):
+    r = client.post(
+        "/extract",
+        headers={"x-api-key": settings.api_key},
+        files={"file": ("cv.txt", b"Cy Wong\nPython and Kubernetes, 4 years")},
+    )
+    rid = r.json()["id"]
+    got = client.get(f"/results/{rid}", headers={"x-api-key": settings.api_key}).json()
+    assert got["result"]["years_experience"] == 4
+    assert "kubernetes" in got["result"]["skills"]

@@ -8,6 +8,7 @@ Plain manifests — no Helm, no operators — applied in filename order.
 | `10-config.yaml` | ConfigMap (non-secret settings) + example Secret |
 | `20-postgres.yaml` | Postgres StatefulSet with a PVC, plus its Service |
 | `30-redis.yaml` | Redis Deployment + Service (Celery broker) |
+| `35-migrate-job.yaml` | One-shot Job running `alembic upgrade head` |
 | `40-api.yaml` | FastAPI Deployment (2 replicas) + Service |
 | `50-worker.yaml` | Celery worker Deployment (2 replicas) |
 | `60-networkpolicy.yaml` | Restrict Postgres/Redis to this app's pods |
@@ -23,6 +24,7 @@ kind create cluster --name docintel
 kind load docker-image docintel:latest --name docintel
 
 kubectl apply -f k8s/
+kubectl -n docintel wait --for=condition=complete job/docintel-migrate --timeout=5m
 kubectl -n docintel rollout status deploy/docintel-api
 kubectl -n docintel rollout status deploy/docintel-worker
 ```
@@ -73,9 +75,6 @@ kubeconform -strict -summary k8s/
 
 These are deliberate scope choices, not oversights:
 
-- **Schema creation races.** The API creates tables on startup, so two replicas
-  can attempt it at once. A real deployment runs Alembic in a pre-deploy `Job`
-  (that migration work is Ticket 11).
 - **`uploads/` is per-pod scratch.** The debug copies of uploads go to an
   `emptyDir`, so they are pod-local and lost on restart. If they mattered they
   would belong in object storage, not a volume.

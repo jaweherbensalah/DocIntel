@@ -153,6 +153,33 @@ class HealthResponse(BaseModel):
     status: str = Field(default="ok", examples=["ok"])
 
 
+class CandidateSummary(BaseModel):
+    """One candidate in a search result."""
+
+    result_id: str = Field(
+        ...,
+        description="Id of the extract result this profile came from.",
+        examples=["a1b2c3d4e5f6"],
+    )
+    name: str = Field(default="", examples=["Jane Doe"])
+    years_experience: int = Field(default=0, ge=0, examples=[5])
+    skills: List[str] = Field(
+        default_factory=list, examples=[["docker", "fastapi", "python"]]
+    )
+
+
+class CandidateSearchResponse(BaseModel):
+    """Response body returned by ``GET /candidates``."""
+
+    total: int = Field(
+        ..., ge=0, description="Total candidates matching the filters.", examples=[2]
+    )
+    items: List[CandidateSummary] = Field(
+        default_factory=list,
+        description="The requested page, most experienced candidates first.",
+    )
+
+
 class ErrorResponse(BaseModel):
     """Standard error envelope used across the API."""
 

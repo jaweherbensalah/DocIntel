@@ -1,4 +1,18 @@
 services:
+  # Owns the schema; runs once and exits.
+  migrate:
+    build: .
+    command: alembic upgrade head
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://docintel:docintel@db:5432/docintel
+      API_KEY: ${API_KEY:-dev-local-key-change-me}
+    depends_on:
+      db:
+        condition: service_healthy
+
   api:
     build: .
     ports:
@@ -11,6 +25,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       API_KEY: ${API_KEY:-dev-local-key-change-me}
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
       redis:
@@ -32,6 +48,8 @@ services:
       PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus_multiproc
       WORKER_METRICS_PORT: 9100
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
       redis:

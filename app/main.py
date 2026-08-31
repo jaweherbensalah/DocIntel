@@ -4,6 +4,7 @@ import os
 import secrets
 import uuid
 from contextlib import asynccontextmanager
+from typing import List, Optional
 
 from fastapi import (
     Depends,
@@ -11,26 +12,32 @@ from fastapi import (
     File,
     Header,
     HTTPException,
+    Query,
     Response,
     UploadFile,
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.config import settings
-from app.db import engine, get_session
+from app.db import get_session
 from app.llm import get_provider
-from app.models import Base, Result
+from app.models import Match, Profile, ProfileSkill, Result
 from app.observability import (
     configure_logging,
     render_metrics,
     request_context_middleware,
     request_id_var,
 )
+from app.persistence import build_match, matches_to_dict, profile_to_dict
 from app.schemas import (
     BatchMatchRequest,
     BatchMatchResponse,
+    CandidateSearchResponse,
+    CandidateSummary,
     ErrorResponse,
     ExtractAcceptedResponse,
     HealthResponse,
@@ -78,8 +85,7 @@ tags_metadata = [
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Schema is owned by Alembic, not the app, so replicas cannot race it.
     yield
 
 
@@ -207,6 +213,11 @@ async def match(
 
     rid = uuid.uuid4().hex
     session.add(Result(id=rid, kind="match", status="done", payload=json.dumps(result)))
+    session.add(
+        build_match(
+            rid, body.job_description, result, candidate_name=body.profile.name
+        )
+    )
     await session.commit()
     return MatchResponse(id=rid, **result)
 
@@ -257,6 +268,16 @@ async def batch_match(
     session.add(
         Result(id=rid, kind="batch_match", status="done", payload=json.dumps(payload))
     )
+    for entry, (profile, result) in zip(shortlist, scored):
+        session.add(
+            build_match(
+                rid,
+                body.job_description,
+                result,
+                rank=entry.rank,
+                candidate_name=entry.name,
+            )
+        )
     await session.commit()
     return BatchMatchResponse(
         id=rid, job_description=body.job_description, shortlist=shortlist
@@ -278,8 +299,90 @@ async def get_result(
     _=Depends(check_auth),
     session: AsyncSession = Depends(get_session),
 ):
-    obj = await session.get(Result, rid)
+    stmt = (
+        select(Result)
+        .where(Result.id == rid)
+        .options(
+            selectinload(Result.profile).selectinload(Profile.skills),
+            selectinload(Result.matches),
+        )
+    )
+    obj = (await session.execute(stmt)).scalar_one_or_none()
     if obj is None:
         raise HTTPException(status_code=404, detail="result not found")
-    result = json.loads(obj.payload) if obj.payload else None
-    return ResultResponse(id=obj.id, kind=obj.kind, status=obj.status, result=result)
+    return ResultResponse(
+        id=obj.id, kind=obj.kind, status=obj.status, result=_read_result(obj)
+    )
+
+
+def _read_result(obj: Result) -> Optional[dict]:
+    """Prefer the normalised tables, fall back to the legacy JSON blob."""
+    if obj.kind == "extract" and obj.profile is not None:
+        return profile_to_dict(obj.profile)
+    if obj.kind in ("match", "batch_match"):
+        normalised = matches_to_dict(obj)
+        if normalised is not None:
+            return normalised
+    return json.loads(obj.payload) if obj.payload else None
+
+
+@app.get(
+    "/candidates",
+    response_model=CandidateSearchResponse,
+    tags=["profiles"],
+    summary="Search extracted candidates by skill and experience",
+    responses={
+        401: {"model": ErrorResponse, "description": "Missing or invalid API key."},
+    },
+)
+async def search_candidates(
+    skill: List[str] = Query(
+        default=[],
+        description="Skill to require. Repeat the parameter to require several.",
+        examples=[["python", "docker"]],
+    ),
+    min_years: int = Query(
+        default=0, ge=0, description="Minimum years of experience."
+    ),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    _=Depends(check_auth),
+    session: AsyncSession = Depends(get_session),
+):
+    matching = select(Profile.id).where(Profile.years_experience >= min_years)
+
+    wanted = {s.strip().lower() for s in skill if s.strip()}
+    if wanted:
+        matching = (
+            matching.join(ProfileSkill, ProfileSkill.profile_id == Profile.id)
+            .where(ProfileSkill.skill.in_(wanted))
+            .group_by(Profile.id)
+            # every requested skill, not just one of them
+            .having(func.count(func.distinct(ProfileSkill.skill)) == len(wanted))
+        )
+
+    matching = matching.subquery()
+    total = await session.scalar(select(func.count()).select_from(matching)) or 0
+
+    page = (
+        select(Profile)
+        .where(Profile.id.in_(select(matching.c.id)))
+        .options(selectinload(Profile.skills))
+        .order_by(Profile.years_experience.desc(), Profile.id)
+        .limit(limit)
+        .offset(offset)
+    )
+    profiles = (await session.execute(page)).scalars().all()
+
+    return CandidateSearchResponse(
+        total=total,
+        items=[
+            CandidateSummary(
+                result_id=p.result_id,
+                name=p.name or "",
+                years_experience=p.years_experience,
+                skills=sorted(s.skill for s in p.skills),
+            )
+            for p in profiles
+        ],
+    )

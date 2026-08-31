@@ -33,6 +33,8 @@ It uses a fake LLM by default so it works offline. To use a real model, set
 - `POST /match` — send a profile + job description, get a score.
 - `POST /batch-match` — score many profiles against one job description; returns
   a ranked shortlist (best first).
+- `GET /candidates` — search extracted candidates by skill and experience, e.g.
+  `/candidates?skill=python&skill=docker&min_years=5`.
 - `GET /health`
 
 All endpoints except `/health` require an `x-api-key` header.
@@ -75,6 +77,20 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on every push and PR: it runs
 the test suite, then builds the image and smoke-tests the full stack via
 `docker compose` (a real `/extract` → `/results` round trip). On pushes to
 `main` or a `v*` tag it also publishes the image to GHCR.
+
+## Database schema
+
+The schema is owned by Alembic, not by the app, so replicas cannot race to
+create tables on startup. `docker compose up` runs a one-shot `migrate` service
+before the API starts. To run it yourself:
+
+```bash
+alembic upgrade head
+```
+
+Results are stored relationally (`profiles`, `profile_skills`, `matches`) so
+they can be queried and indexed. See the Ticket 11 section of `DECISIONS.md`
+for the expand/backfill/contract migration strategy.
 
 ## Kubernetes
 

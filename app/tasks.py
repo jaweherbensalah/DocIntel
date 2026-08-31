@@ -4,10 +4,13 @@ import json
 import logging
 import time
 
+from sqlalchemy import select
+
 from app.celery_app import celery_app
 from app.llm import get_provider
-from app.models import Result
+from app.models import Profile, Result
 from app.observability import request_id_var
+from app.persistence import build_profile
 from app.sync_db import SyncSessionLocal
 
 logger = logging.getLogger("docintel.tasks")
@@ -41,6 +44,12 @@ def extract_profile(self, rid: str, text: str, request_id: str = "-") -> None:
 
         obj.payload = json.dumps(profile)
         obj.status = "done"
+        # acks_late can redeliver a job that already committed
+        already_stored = session.scalar(
+            select(Profile.id).where(Profile.result_id == rid)
+        )
+        if already_stored is None:
+            session.add(build_profile(rid, profile))
         session.commit()
         logger.info(
             "extraction done",

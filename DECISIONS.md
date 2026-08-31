@@ -538,3 +538,100 @@ kubeconform -strict -summary k8s/
 
 On a local cluster, see `k8s/README.md` for the full kind walkthrough
 (`kind load docker-image` side-loads the image, so no registry is needed).
+
+## Ticket 11 — Evolve the data model with zero downtime
+
+### What was wrong
+
+Every result was `json.dumps`-ed into a single `TEXT` column. Nothing about it
+was queryable: "which candidates know Python and have 5+ years?" required
+loading every row and parsing it in Python. No index could help, and the column
+had no schema, so nothing validated what went into it.
+
+### The new model
+
+`results` stays as the job record (id, kind, status, timestamps). Around it:
+
+| Table | Holds | Why a table |
+|---|---|---|
+| `profiles` | one row per extract: name, years of experience | the row we filter and sort on |
+| `profile_skills` | `(profile_id, skill)` | the actual query axis, indexed |
+| `matches` | one row per scored candidate | a batch of 50 becomes 50 queryable rows |
+
+The rule applied: **normalise what you query, keep the long tail as JSON.**
+`matched_skills` / `missing_skills` stay JSON columns on `matches` (JSONB on
+Postgres) because nothing filters on them; skills on a profile became a real
+table because that is exactly what we filter on.
+
+`GET /candidates?skill=python&skill=docker&min_years=5` exists to make the
+payoff concrete: it is one indexed query now and was impossible before.
+
+### The migration: expand, backfill, contract
+
+The point of the ticket is that this has to happen under live traffic, so it is
+split across releases. No single step both writes and reads the new shape.
+
+| Step | Ships in | Safe because |
+|---|---|---|
+| **1. Expand** (`0002_expand`) | release N | purely additive: new tables, nothing altered or dropped, so release N-1 keeps working untouched |
+| **2. Dual-write** (app) | release N | writes both shapes; reads still tolerate either |
+| **3. Backfill** (`0003_backfill`) | release N | batched and committed per batch, so no long transaction or lock |
+| **4. Read from new** (app) | release N | falls back to `payload` for any row the backfill has not reached |
+| **5. Contract** (drop `payload`) | **release N+1** | only once steps 1-4 have been live and verified |
+
+Details that make each step actually safe:
+
+- **The one index on the live table is `CREATE INDEX CONCURRENTLY`**, inside an
+  `autocommit_block` because it cannot run in a transaction. A plain
+  `CREATE INDEX` takes a write lock on `results` for its duration. Indexes on
+  the new tables are ordinary, since those tables are empty at creation.
+- **The backfill uses keyset pagination** on the primary key, so it always makes
+  forward progress and never scans the whole table in one statement. Crucially,
+  the cursor advances even when every row in a batch is skipped, so a bad row
+  cannot spin the loop forever.
+- **It is idempotent.** Rows that already have normalised data are skipped via
+  `NOT EXISTS`, so it can be re-run after an interruption, or re-run once
+  dual-writing is live to sweep up anything written in between.
+- **An unparseable payload is logged and skipped, not fatal.** One bad legacy
+  row should not roll back a deployment.
+- **The app owns no schema any more.** `create_all` on startup was removed (two
+  API replicas would race it); a `migrate` service in compose and a `Job` in
+  `k8s/35-migrate-job.yaml` run `alembic upgrade head` exactly once.
+
+### Why the contract step is deliberately not in this commit
+
+Dropping `payload` in the same release that starts reading the new tables would
+defeat the purpose: if the new read path had to be rolled back, the data it
+replaced would already be gone. It ships one release later, once the dual-write
+release has been verified in production:
+
+```python
+def upgrade() -> None:
+    op.drop_column("results", "payload")
+```
+
+That is a metadata-only operation in Postgres, so it is instant and lock-cheap.
+Leaving it out is the point, not an omission.
+
+### Trade-offs accepted
+
+- **`job_description` is denormalised onto every `matches` row.** A 50-candidate
+  batch stores it 50 times. A `match_batches` parent table would remove the
+  duplication; it is not worth the join until the text gets large.
+- **Legacy `match` rows backfill with an empty `job_description`**, because the
+  old payload never stored it. Nothing is lost that was ever recorded.
+- **The backfill runs inside the migration.** Fine at this size. Past a few
+  million rows it should move to a standalone job so a slow backfill cannot hold
+  up a deploy; the batching is already written to support that.
+
+### How to verify
+
+```bash
+pytest -q
+```
+
+`tests/test_migrations.py` is the real proof: it builds a database in the *old*
+shape, seeds legacy rows of every kind plus a deliberately corrupt one, runs the
+migrations against it, then asserts the normalised data is correct, that
+`results.payload` was left intact (no data loss), that the bad row was skipped
+rather than fatal, and that re-running the backfill produces no duplicates.
