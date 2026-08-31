@@ -27,5 +27,9 @@ class Settings(BaseSettings):
     # Task queue (Celery broker + result backend)
     redis_url: str = "redis://localhost:6379/0"
 
+    # Applied to the development client created by `python -m app.admin seed`.
+    default_monthly_budget_cents: int = 50_000
+    default_rate_limit_per_minute: int = 60
+
 
 settings = Settings()

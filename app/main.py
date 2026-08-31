@@ -1,7 +1,7 @@
+import hashlib
 import json
 import logging
 import os
-import secrets
 import uuid
 from contextlib import asynccontextmanager
 from typing import List, Optional
@@ -25,7 +25,8 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.db import get_session
 from app.llm import get_provider
-from app.models import Match, Profile, ProfileSkill, Result
+from app.models import Client, Match, Profile, ProfileSkill, Result
+from app import budget, limits
 from app.observability import (
     configure_logging,
     render_metrics,
@@ -121,12 +122,70 @@ async def metrics():
     return Response(content=data, media_type=content_type)
 
 
-def check_auth(x_api_key: str = Header(default=None, description="Client API key.")):
-    # Constant-time comparison to avoid leaking the key via response timing.
-    if not x_api_key or not secrets.compare_digest(x_api_key, settings.api_key):
+async def require_client(
+    response: Response,
+    x_api_key: str = Header(default=None, description="Client API key."),
+    session: AsyncSession = Depends(get_session),
+) -> Client:
+    if not x_api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid api key"
         )
+
+    # Looking the key up by hash keeps the comparison off the response-time
+    # side channel that a plain string compare would open.
+    key_hash = hashlib.sha256(x_api_key.encode()).hexdigest()
+    client = await session.scalar(
+        select(Client).where(Client.api_key_hash == key_hash, Client.active.is_(True))
+    )
+    if client is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid api key"
+        )
+
+    decision = limits.check(client.id, client.rate_limit_per_minute)
+    response.headers["X-RateLimit-Limit"] = str(decision.limit)
+    response.headers["X-RateLimit-Remaining"] = str(decision.remaining)
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="rate limit exceeded",
+            headers={
+                "Retry-After": str(decision.retry_after_seconds),
+                "X-RateLimit-Limit": str(decision.limit),
+                "X-RateLimit-Remaining": "0",
+            },
+        )
+    return client
+
+
+async def reserve_budget(
+    session: AsyncSession,
+    client: Client,
+    operation: str,
+    characters: int,
+    units: int = 1,
+) -> budget.Reservation:
+    cost = budget.estimate_cents(operation, characters, units)
+    try:
+        return await budget.reserve(
+            session, client.id, client.monthly_budget_cents, operation, cost
+        )
+    except budget.BudgetExceeded as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=f"monthly budget exhausted for {exc.period}",
+        ) from exc
+
+
+BUDGET_RESPONSE = {
+    "model": ErrorResponse,
+    "description": "The client's monthly budget is exhausted.",
+}
+RATE_RESPONSE = {
+    "model": ErrorResponse,
+    "description": "The client's rate limit was exceeded; see Retry-After.",
+}
 
 
 @app.get(
@@ -147,15 +206,17 @@ async def health():
     summary="Submit a CV for asynchronous extraction",
     responses={
         401: {"model": ErrorResponse, "description": "Missing or invalid API key."},
+        402: BUDGET_RESPONSE,
         422: {
             "model": ErrorResponse,
             "description": "The uploaded file was empty or unreadable.",
         },
+        429: RATE_RESPONSE,
     },
 )
 async def extract(
     file: UploadFile = File(..., description="CV document to process (UTF-8 text)."),
-    _=Depends(check_auth),
+    client: Client = Depends(require_client),
     session: AsyncSession = Depends(get_session),
 ):
     content = await file.read()
@@ -175,14 +236,15 @@ async def extract(
 
     text = content.decode("utf-8", errors="ignore")
 
-    # Record the job as pending, then hand the heavy work to a background
-    # worker and return immediately instead of blocking the request.
+    # Charged before the model runs, so simultaneous requests cannot each see
+    # an affordable balance. The worker settles the real cost afterwards.
+    reservation = await reserve_budget(session, client, "extract", len(text))
+
     rid = uuid.uuid4().hex
     session.add(Result(id=rid, kind="extract", status="pending", payload=None))
     await session.commit()
 
-    # Propagate the request id so the worker's logs correlate with this request.
-    extract_profile.delay(rid, text, request_id_var.get())
+    extract_profile.delay(rid, text, request_id_var.get(), reservation.event_id)
     logger.info(
         "extraction enqueued",
         extra={"extra_fields": {"rid": rid, "bytes": len(content)}},
@@ -198,17 +260,22 @@ async def extract(
     summary="Score a profile against a job description",
     responses={
         401: {"model": ErrorResponse, "description": "Missing or invalid API key."},
+        402: BUDGET_RESPONSE,
         422: {
             "model": ErrorResponse,
             "description": "The request body failed validation.",
         },
+        429: RATE_RESPONSE,
     },
 )
 async def match(
     body: MatchRequest,
-    _=Depends(check_auth),
+    client: Client = Depends(require_client),
     session: AsyncSession = Depends(get_session),
 ):
+    reservation = await reserve_budget(
+        session, client, "match", len(body.job_description)
+    )
     result = get_provider().match(body.profile.model_dump(), body.job_description)
 
     rid = uuid.uuid4().hex
@@ -219,6 +286,7 @@ async def match(
         )
     )
     await session.commit()
+    await budget.settle(session, reservation.event_id, reservation.estimated_cents)
     return MatchResponse(id=rid, **result)
 
 
@@ -229,17 +297,28 @@ async def match(
     summary="Score many profiles against one job description",
     responses={
         401: {"model": ErrorResponse, "description": "Missing or invalid API key."},
+        402: BUDGET_RESPONSE,
         422: {
             "model": ErrorResponse,
             "description": "The request body failed validation.",
         },
+        429: RATE_RESPONSE,
     },
 )
 async def batch_match(
     body: BatchMatchRequest,
-    _=Depends(check_auth),
+    client: Client = Depends(require_client),
     session: AsyncSession = Depends(get_session),
 ):
+    # A batch of 50 costs roughly 50 times one match, so it is priced per
+    # profile rather than per request.
+    reservation = await reserve_budget(
+        session,
+        client,
+        "batch_match",
+        len(body.job_description),
+        units=len(body.profiles),
+    )
     provider = get_provider()
     scored = [
         (profile, provider.match(profile.model_dump(), body.job_description))
@@ -279,6 +358,7 @@ async def batch_match(
             )
         )
     await session.commit()
+    await budget.settle(session, reservation.event_id, reservation.estimated_cents)
     return BatchMatchResponse(
         id=rid, job_description=body.job_description, shortlist=shortlist
     )
@@ -292,11 +372,12 @@ async def batch_match(
     responses={
         401: {"model": ErrorResponse, "description": "Missing or invalid API key."},
         404: {"model": ErrorResponse, "description": "No result exists with that id."},
+        429: RATE_RESPONSE,
     },
 )
 async def get_result(
     rid: str,
-    _=Depends(check_auth),
+    client: Client = Depends(require_client),
     session: AsyncSession = Depends(get_session),
 ):
     stmt = (
@@ -333,6 +414,7 @@ def _read_result(obj: Result) -> Optional[dict]:
     summary="Search extracted candidates by skill and experience",
     responses={
         401: {"model": ErrorResponse, "description": "Missing or invalid API key."},
+        429: RATE_RESPONSE,
     },
 )
 async def search_candidates(
@@ -346,7 +428,7 @@ async def search_candidates(
     ),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    _=Depends(check_auth),
+    client: Client = Depends(require_client),
     session: AsyncSession = Depends(get_session),
 ):
     matching = select(Profile.id).where(Profile.years_experience >= min_years)

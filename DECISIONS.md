@@ -635,3 +635,110 @@ shape, seeds legacy rows of every kind plus a deliberately corrupt one, runs the
 migrations against it, then asserts the normalised data is correct, that
 `results.payload` was left intact (no data loss), that the bad row was skipped
 rather than fatal, and that re-running the backfill produces no duplicates.
+
+## Ticket 12: Enforce per-client cost and rate budgets
+
+### The actual problem
+
+The naive version of both limits is a read, a decision, then a write:
+
+```python
+if spent + cost <= limit:      # two requests can both pass here
+    spent += cost              # and both write
+```
+
+That is a lost update. Ten concurrent requests against a budget with room for
+one will all be admitted. The ticket says as much: a client "must not be able to
+exceed their budget or their rate by sending many requests at the same time",
+so the whole of this ticket is about making each decision atomic.
+
+### Two limits, two stores
+
+| | Store | Why |
+|---|---|---|
+| Rate limit | Redis | high volume, per-request, and disposable: losing the counter on restart costs nothing |
+| Budget | Postgres | it is money. A counter lost to a Redis restart is an invoice we cannot send |
+
+Using one store for both would get one of them wrong: Redis is not durable
+enough for billing, and Postgres should not take a write on every single
+request just to count them.
+
+### Rate limit: one Lua script
+
+`app/limits.py` keeps request timestamps in a sorted set and trims the window on
+each call, so it is a true sliding window rather than a fixed one (a fixed
+window lets a client fire the full allowance either side of a boundary and get
+2x through). Trim, count and add are one Lua script, and **Redis executes
+scripts single-threaded**, so the three steps cannot interleave with another
+request. That property, not the algorithm, is what makes it correct.
+
+Rejections return `429` with `Retry-After` derived from when the oldest request
+in the window expires, plus `X-RateLimit-Limit` / `X-RateLimit-Remaining` on
+every response.
+
+### Budget: one conditional UPDATE
+
+`app/budget.py` never reads-then-writes. The check *is* the write:
+
+```sql
+UPDATE budget_periods
+SET reserved_cents = reserved_cents + :cost
+WHERE client_id = :c AND period = :p
+  AND spent_cents + reserved_cents + :cost <= :limit
+```
+
+Zero rows updated means the client could not afford it. Concurrent callers
+serialise on the row lock and each re-evaluates the predicate against the
+committed total, so the sum of successful reservations can never exceed the
+budget.
+
+### Reserve first, settle after
+
+The cost of a model call is not known until it returns, but charging afterwards
+is exactly the race above: everything in flight is invisible. So requests
+**reserve** an estimate up front, and the real cost is **settled** when the work
+finishes, releasing whatever was over-reserved.
+
+That is why `budget_periods` splits `reserved_cents` from `spent_cents`: the
+limit is checked against both, so money committed to in-flight work counts
+against the budget immediately.
+
+Each reservation writes a `usage_events` row, which gives settlement something
+idempotent to key on: settle and release only act on a row still in the
+`reserved` state, so a redelivered Celery task cannot double-charge. `/extract`
+is settled by the worker, and released if the job is abandoned or exhausts its
+retries.
+
+### Status codes
+
+- `429` for the rate limit, with `Retry-After`, because it is temporary.
+- `402 Payment Required` for the budget, because retrying will not help until
+  the client buys more or the month rolls over. Reusing `429` would tell an
+  integrator to back off and try again, which is wrong here.
+
+Reads (`/results`, `/candidates`) are rate limited but not charged: they cost no
+model time, and cutting off a client's access to work they already paid for
+because the budget ran out would be indefensible.
+
+### Scope
+
+This introduces per-client API keys (`clients` table, SHA-256 of a random key;
+a password KDF would be the wrong tool for high-entropy secrets). It stops at
+enforcement. Isolating each client's *data* is Ticket 14, and stays out of here.
+
+### How to verify
+
+```bash
+pytest -q
+```
+
+The two tests that matter run the race deliberately:
+
+- `test_concurrent_reservations_never_overspend` puts twenty threads on a budget
+  that covers ten of them and asserts exactly ten succeed.
+- `test_rate_limiter_is_atomic_under_concurrency` fires fifty simultaneous
+  requests at a limit of ten and asserts exactly ten pass.
+
+Both would fail against a read-then-write implementation. The limiter tests run
+the real Lua script against `fakeredis`, so it is the production code path being
+exercised rather than a stand-in.

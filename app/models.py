@@ -3,6 +3,7 @@ from typing import List, Optional
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -100,3 +101,50 @@ class Match(Base):
     result: Mapped["Result"] = relationship(back_populates="matches")
 
     __table_args__ = (Index("ix_matches_score", "score"),)
+
+
+class Client(Base):
+    """An API consumer, with the budget and rate limit they were sold."""
+
+    __tablename__ = "clients"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    # SHA-256 of the key. Keys are high-entropy random, so a fast hash is
+    # appropriate here; a password KDF would not be.
+    api_key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    monthly_budget_cents: Mapped[int] = mapped_column(Integer, default=0)
+    rate_limit_per_minute: Mapped[int] = mapped_column(Integer, default=60)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class BudgetPeriod(Base):
+    """Money committed and money spent, per client per calendar month."""
+
+    __tablename__ = "budget_periods"
+
+    client_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("clients.id", ondelete="CASCADE"), primary_key=True
+    )
+    period: Mapped[str] = mapped_column(String(7), primary_key=True)  # "YYYY-MM"
+    # In flight: reserved before the model runs, cleared when it settles.
+    reserved_cents: Mapped[int] = mapped_column(Integer, default=0)
+    spent_cents: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class UsageEvent(Base):
+    """One charge. Gives settlement something idempotent to key off."""
+
+    __tablename__ = "usage_events"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    client_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("clients.id", ondelete="CASCADE"), index=True
+    )
+    period: Mapped[str] = mapped_column(String(7))
+    operation: Mapped[str] = mapped_column(String(16))
+    estimated_cents: Mapped[int] = mapped_column(Integer, default=0)
+    actual_cents: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    state: Mapped[str] = mapped_column(String(16), default="reserved")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

@@ -39,6 +39,19 @@ It uses a fake LLM by default so it works offline. To use a real model, set
 
 All endpoints except `/health` require an `x-api-key` header.
 
+## Clients, budgets and rate limits
+
+Each client has its own API key, a monthly budget and a per-minute rate limit.
+`docker compose up` seeds a development client from `API_KEY`. To add more:
+
+```bash
+python -m app.admin create "Acme" --budget-cents 50000 --rate 120
+```
+
+Rate limits return `429` with `Retry-After`; an exhausted budget returns `402`.
+Reads are rate limited but not charged. Model calls reserve an estimated cost up
+front and settle the real cost when the work finishes.
+
 ## Observability
 
 - **Logs** are structured JSON with a `request_id` on every line (API and worker).

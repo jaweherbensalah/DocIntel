@@ -7,11 +7,13 @@ os.environ["API_KEY"] = "test-key"  # required by config; set before app import
 
 from pathlib import Path
 
+import fakeredis
 import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
 
+from app import limits
 from app.config import settings
 from app.celery_app import celery_app
 from app.main import app
@@ -34,8 +36,19 @@ def schema():
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "migrations"))
     command.upgrade(cfg, "head")
+
+    from app.admin import seed_default
+
+    settings.default_rate_limit_per_minute = 10_000
+    settings.default_monthly_budget_cents = 10_000_000
+    seed_default()
     yield
     db.unlink(missing_ok=True)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def rate_limiter():
+    limits.use_client(fakeredis.FakeStrictRedis())
 
 
 @pytest.fixture(scope="module")
@@ -251,3 +264,59 @@ def test_extract_result_is_served_from_normalised_tables(client):
     got = client.get(f"/results/{rid}", headers={"x-api-key": settings.api_key}).json()
     assert got["result"]["years_experience"] == 4
     assert "kubernetes" in got["result"]["skills"]
+
+
+def test_unknown_api_key_is_rejected(client):
+    assert client.get("/candidates", headers={"x-api-key": "nope"}).status_code == 401
+
+
+def test_rate_limit_returns_429_with_retry_after(client):
+    from app.admin import create_client
+
+    key = create_client("rate-limited", budget_cents=1_000_000, rate_per_minute=3)
+    codes = [
+        client.get("/candidates", headers={"x-api-key": key}).status_code
+        for _ in range(5)
+    ]
+    assert codes.count(200) == 3
+    assert codes.count(429) == 2
+
+    blocked = client.get("/candidates", headers={"x-api-key": key})
+    assert blocked.headers["Retry-After"]
+    assert blocked.headers["X-RateLimit-Limit"] == "3"
+
+
+def test_exhausted_budget_returns_402(client):
+    from app.admin import create_client
+
+    key = create_client("no-budget", budget_cents=0, rate_per_minute=100)
+    r = client.post(
+        "/match",
+        headers={"x-api-key": key},
+        json={"profile": {"skills": ["python"]}, "job_description": "Python"},
+    )
+    assert r.status_code == 402
+
+    # Reads cost nothing, so they stay available once the budget is gone.
+    assert client.get("/candidates", headers={"x-api-key": key}).status_code == 200
+
+
+def test_spend_accumulates_and_then_blocks(client):
+    from app.admin import create_client
+    from sqlalchemy import text
+    from app.sync_db import sync_engine
+
+    key = create_client("small-budget", budget_cents=6, rate_per_minute=100)
+    body = {"profile": {"skills": ["python"]}, "job_description": "Python"}
+
+    codes = [
+        client.post("/match", headers={"x-api-key": key}, json=body).status_code
+        for _ in range(6)
+    ]
+    assert 200 in codes and 402 in codes
+
+    with sync_engine.connect() as conn:
+        spent = conn.execute(
+            text("SELECT MAX(spent_cents + reserved_cents) FROM budget_periods")
+        ).scalar_one()
+    assert spent <= 1_000_000

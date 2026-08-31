@@ -36,7 +36,7 @@ spec:
         - name: migrate
           image: docintel:latest
           imagePullPolicy: IfNotPresent
-          command: ["alembic", "upgrade", "head"]
+          command: ["sh", "-c", "alembic upgrade head && python -m app.admin seed"]
           envFrom:
             - configMapRef:
                 name: docintel-config

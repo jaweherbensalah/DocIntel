@@ -2,7 +2,7 @@ services:
   # Owns the schema; runs once and exits.
   migrate:
     build: .
-    command: alembic upgrade head
+    command: sh -c "alembic upgrade head && python -m app.admin seed"
     env_file:
       - path: .env
         required: false
