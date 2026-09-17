@@ -268,6 +268,24 @@ def test_unknown_api_key_is_rejected(client):
     assert client.get("/candidates", headers={"x-api-key": "nope"}).status_code == 401
 
 
+def test_hostile_cv_still_yields_a_well_formed_profile(client):
+    hostile = (ROOT / "fixtures" / "cv_hostile.txt").read_bytes()
+    r = client.post(
+        "/extract",
+        headers={"x-api-key": settings.api_key},
+        files={"file": ("cv.txt", hostile)},
+    )
+    assert r.status_code == 202
+
+    result = client.get(
+        f"/results/{r.json()['id']}", headers={"x-api-key": settings.api_key}
+    ).json()["result"]
+
+    assert set(result) == {"name", "skills", "years_experience"}
+    assert 0 <= result["years_experience"] <= 80
+    assert all(isinstance(s, str) for s in result["skills"])
+
+
 def test_rate_limit_returns_429_with_retry_after(client):
     from app.admin import create_client
 

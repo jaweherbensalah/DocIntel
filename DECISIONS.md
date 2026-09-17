@@ -798,3 +798,71 @@ pytest -q
 created, and it asserts that one cannot read the other's result by id, that
 `/candidates` returns only the caller's candidates, that match results are owned
 by their creator, and that a deliberately unowned row is invisible to everyone.
+
+## Ticket 13: Harden the pipeline against malicious documents
+
+### Threat model
+
+An uploaded CV is fully attacker-controlled text that we hand to a model. The
+realistic goals of an attacker are to rewrite our instructions (inflate their
+own score, or corrupt someone else's), to extract our prompt or credentials,
+and to poison the database through whatever the model returns.
+
+### What actually defends against this
+
+Two structural properties, neither of which is pattern matching:
+
+**1. The document never enters the instruction channel.** The system prompt,
+our instruction, and the untrusted text are three separate messages. The
+document is fenced with a marker containing a per-call random nonce, and the
+system prompt states that text inside the fence is data and must never be
+obeyed. A CV cannot close a fence whose value it could not predict, so the
+classic `-----END DOCUMENT-----` breakout does nothing. Previously the document
+was interpolated straight into the instruction sentence, which put attacker
+text and our orders in the same breath.
+
+**2. Nothing the model returns is trusted.** Every response is coerced into our
+schema: unknown keys dropped, types forced, strings truncated, `years_experience`
+clamped to 0-80, `score` to 0-100, skills deduplicated and capped. This is the
+defence that holds even if the injection *works*, because a fully hijacked model
+still cannot write a value we did not validate.
+
+On top of those, output is checked for egress before it is used: if a response
+contains the system prompt, the nonce or the API key, it is rejected rather than
+returned to the client.
+
+Input is also normalised at the API boundary: NFKC (so homoglyphs and full-width
+characters cannot dodge anything downstream), zero-width and bidi-override
+characters stripped (they hide instructions from a human reviewing the file),
+control characters removed, and length capped.
+
+### Why the regex list is not the defence
+
+`app/sanitize.py` flags phrases like "ignore previous instructions", but those
+signals only feed logs and metrics. They do not block the request. A blocklist
+of phrasings is trivially bypassed by rewording, and treating it as a control
+would give false confidence while breaking legitimate CVs (a security engineer's
+CV may well contain the words "system prompt"). Detection is for noticing that
+someone is trying, not for stopping them.
+
+### Honest limitation
+
+The default provider is the offline fake one, so this cannot be demonstrated
+against a real model end to end. What is verified is everything deterministic:
+the sanitiser, the message structure actually sent to the API, the output
+validation, and the egress check. Testing whether a specific model resists a
+specific phrasing would be a model-evaluation exercise, and it would not change
+the design: the point of clamping the output is that it holds regardless.
+
+### How to verify
+
+```bash
+pytest -q
+```
+
+`tests/test_injection.py` runs `fixtures/cv_hostile.txt` (instruction override,
+forged fence, secret request) through the pipeline and asserts the hostile text
+lands in the data message rather than the instruction, that a hijacked response
+is clamped back into the schema, and that a model echoing the system prompt is
+rejected. `test_hostile_cv_still_yields_a_well_formed_profile` checks the same
+end to end through the API.

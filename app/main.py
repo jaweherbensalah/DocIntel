@@ -34,6 +34,7 @@ from app.observability import (
     request_id_var,
 )
 from app.persistence import build_match, matches_to_dict, profile_to_dict
+from app.sanitize import sanitise_document, sanitise_job_description
 from app.schemas import (
     BatchMatchRequest,
     BatchMatchResponse,
@@ -236,6 +237,13 @@ async def extract(
 
     text = content.decode("utf-8", errors="ignore")
 
+    # The upload is attacker-controlled, so normalise it and cap its size before
+    # it reaches the model or the database.
+    document = sanitise_document(text)
+    text = document.text
+    if not text.strip():
+        raise HTTPException(status_code=422, detail="uploaded file has no text")
+
     # Charged before the model runs, so simultaneous requests cannot each see
     # an affordable balance. The worker settles the real cost afterwards.
     reservation = await reserve_budget(session, client, "extract", len(text))
@@ -284,7 +292,8 @@ async def match(
     reservation = await reserve_budget(
         session, client, "match", len(body.job_description)
     )
-    result = get_provider().match(body.profile.model_dump(), body.job_description)
+    job_description = sanitise_job_description(body.job_description).text
+    result = get_provider().match(body.profile.model_dump(), job_description)
 
     rid = uuid.uuid4().hex
     session.add(
@@ -297,9 +306,7 @@ async def match(
         )
     )
     session.add(
-        build_match(
-            rid, body.job_description, result, candidate_name=body.profile.name
-        )
+        build_match(rid, job_description, result, candidate_name=body.profile.name)
     )
     await session.commit()
     await budget.settle(session, reservation.event_id, reservation.estimated_cents)
@@ -336,8 +343,9 @@ async def batch_match(
         units=len(body.profiles),
     )
     provider = get_provider()
+    job_description = sanitise_job_description(body.job_description).text
     scored = [
-        (profile, provider.match(profile.model_dump(), body.job_description))
+        (profile, provider.match(profile.model_dump(), job_description))
         for profile in body.profiles
     ]
     # Rank best-first; Python's sort is stable, so ties keep input order.
