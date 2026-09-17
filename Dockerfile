@@ -26,6 +26,10 @@ RUN python -m compileall -b -q app \
 # Minimal image that only carries the installed packages and the app code.
 FROM python:3.11-slim AS runtime
 
+# Set by CI so a running image can be traced back to the commit it was built from.
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.revision=$VCS_REF
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 

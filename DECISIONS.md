@@ -866,3 +866,71 @@ lands in the data message rather than the instruction, that a hijacked response
 is clamped back into the schema, and that a model echoing the system prompt is
 rejected. `test_hostile_cv_still_yields_a_well_formed_profile` checks the same
 end to end through the API.
+
+## Ticket 18: Make the image supply chain trustworthy
+
+### What a client actually needs
+
+Two questions, and they need different answers:
+
+1. *Is this image really the one you built from your source?* Answered by
+   signing, not by a checksum we publish on a page we also control.
+2. *Does it contain anything known to be vulnerable?* Answered by scanning at
+   build time and by publishing a bill of materials they can re-check later.
+
+### Signing
+
+Images are signed with cosign in **keyless** mode. GitHub mints a short-lived
+OIDC token for the workflow, the signature is bound to that workflow identity,
+and it is recorded in the public Rekor transparency log. The point is that there
+is no long-lived private key: nothing for us to leak, rotate or have stolen, and
+a client can see in a public log when a signature was created.
+
+Verification is pinned to the workflow identity, not merely "signed by
+somebody", which is the mistake that makes signing theatre:
+
+```bash
+cosign verify ghcr.io/<owner>/docintel@sha256:<digest> \
+  --certificate-identity-regexp "https://github.com/<owner>/docintel/.github/workflows/ci.yml@.*" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+### SBOM and provenance
+
+The build emits SBOM and provenance attestations (`sbom: true`,
+`provenance: mode=max`), and an SPDX SBOM is additionally attached as a signed
+attestation. A client can therefore answer "does this image contain log4j" months
+later without our help, which matters because the interesting question usually
+arrives long after the release.
+
+The image also carries `org.opencontainers.image.source` and `.revision`, so a
+running container can be traced back to the commit that produced it.
+
+### Scanning
+
+A `scan` job builds the image and runs Trivy over its OS and Python packages.
+Findings go to GitHub code scanning as SARIF, and the job fails on HIGH or
+CRITICAL. `ignore-unfixed` is on deliberately: failing a release for a
+vulnerability with no available patch does not make anyone safer, it just trains
+the team to ignore red builds.
+
+`publish` needs `[test, build-smoke, scan]`, so an image with known fixable
+vulnerabilities is never pushed.
+
+### Pull by digest
+
+The README tells clients to pull by digest rather than tag. A tag is a mutable
+pointer; if an attacker gets push access they can move `:latest` without
+touching the image anyone verified. A digest is the content.
+
+Dependabot covers pip *and* github-actions, because an Action is third-party
+code running inside our release pipeline with our registry credentials.
+
+### Known gap
+
+Actions are referenced by version tag rather than commit SHA, which is a
+mutable reference in exactly the way this ticket warns about. Pinning them to
+SHAs (with Dependabot keeping them current) is the obvious next step; it is left
+out here only because it is mechanical. Python dependencies are pinned to exact
+versions but not hashes; `pip install --require-hashes` against a compiled
+lockfile would close that.

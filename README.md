@@ -88,7 +88,6 @@ curl -s http://localhost:8000/results/<id> -H "x-api-key: $API_KEY"
 pytest
 ```
 ## CI/CD
-
 GitHub Actions (`.github/workflows/ci.yml`) runs on every push and PR: it runs
 the test suite, then builds the image and smoke-tests the full stack via
 `docker compose` (a real `/extract` → `/results` round trip). On pushes to
@@ -107,6 +106,27 @@ alembic upgrade head
 Results are stored relationally (`profiles`, `profile_skills`, `matches`) so
 they can be queried and indexed. See the Ticket 11 section of `DECISIONS.md`
 for the expand/backfill/contract migration strategy.
+
+## Verifying a published image
+
+Every image is signed with cosign (keyless, so there is no private key) and
+ships a signed SBOM. Before running it, confirm it came from this repository's
+pipeline and not from someone else:
+
+```bash
+IMAGE=ghcr.io/<owner>/docintel@sha256:<digest>
+
+cosign verify "$IMAGE" \
+  --certificate-identity-regexp "https://github.com/<owner>/docintel/.github/workflows/ci.yml@.*" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+cosign verify-attestation "$IMAGE" --type spdxjson \
+  --certificate-identity-regexp "https://github.com/<owner>/docintel/.github/workflows/ci.yml@.*" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Always pull by digest, not by tag: a tag can be moved to point at a different
+image, a digest cannot.
 
 ## Kubernetes
 
