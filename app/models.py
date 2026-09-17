@@ -30,6 +30,11 @@ class Result(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     kind: Mapped[str] = mapped_column(String(16))  # "extract" | "match" | "batch_match"
+    # Owning tenant. Nullable only until the backfill is verified; every query
+    # filters on it, so an unowned row is visible to nobody.
+    client_id: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(16), default="done")
     # Legacy blob, still dual-written. Dropped by the contract migration.
     payload: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

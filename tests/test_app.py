@@ -42,8 +42,6 @@ def schema():
     settings.default_rate_limit_per_minute = 10_000
     settings.default_monthly_budget_cents = 10_000_000
     seed_default()
-    yield
-    db.unlink(missing_ok=True)
 
 
 @pytest.fixture(scope="module", autouse=True)

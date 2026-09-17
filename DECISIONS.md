@@ -742,3 +742,59 @@ The two tests that matter run the race deliberately:
 Both would fail against a read-then-write implementation. The limiter tests run
 the real Lua script against `fakeredis`, so it is the production code path being
 exercised rather than a stand-in.
+
+## Ticket 14: Make it truly multi-tenant
+
+### What was wrong
+
+Ticket 12 gave every client their own API key, but nothing scoped *data* to
+them. `GET /results/{id}` looked a row up by id alone, and `/candidates`
+returned every profile in the database. Any client could read another client's
+extracted CVs by replaying or guessing an id. Adding per-client credentials
+without per-client scoping is arguably worse than a single shared key, because
+it looks isolated and is not.
+
+### What we changed
+
+`results` gained an indexed `client_id`. Every write stamps the caller onto the
+row; every read filters on it. `profiles` and `matches` hang off `results`, so
+they inherit ownership through a join rather than duplicating the discriminator.
+
+`GET /results/{id}` returns **404, not 403**, for another tenant's id. A 403
+would confirm the id exists, which is itself a leak: it would let a client probe
+for their competitors' result ids.
+
+### The migration
+
+Same expand pattern as Ticket 11. The column is added nullable with no default,
+so Postgres rewrites nothing and takes no meaningful lock, and the index is
+built `CONCURRENTLY`.
+
+Backfilling ownership is the interesting part, because it is genuinely
+ambiguous. If the database has exactly one client then every pre-existing result
+is unambiguously theirs and is attributed. With more than one, ownership is
+unknowable, so rows are left `NULL` and the migration logs how many. Since every
+query filters on `client_id`, a `NULL` row is visible to nobody: the failure
+mode is losing access to old data, not leaking it. Guessing an owner would have
+been the opposite trade, and the wrong one for personal data.
+
+`client_id` stays nullable for now for the same reason as Ticket 11's `payload`:
+tightening it to `NOT NULL` belongs in a later release, once the backfill has
+been verified against real data.
+
+### No foreign key, deliberately
+
+`client_id` is an indexed plain column, not an FK. Deleting a client should not
+silently cascade away the results they were billed for, and validating a new
+constraint on a hot table costs a lock for little benefit here.
+
+### How to verify
+
+```bash
+pytest -q
+```
+
+`tests/test_tenancy.py` is the guarantee the ticket asks for. Two clients are
+created, and it asserts that one cannot read the other's result by id, that
+`/candidates` returns only the caller's candidates, that match results are owned
+by their creator, and that a deliberately unowned row is invisible to everyone.

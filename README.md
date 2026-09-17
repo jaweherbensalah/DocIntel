@@ -52,6 +52,9 @@ Rate limits return `429` with `Retry-After`; an exhausted budget returns `402`.
 Reads are rate limited but not charged. Model calls reserve an estimated cost up
 front and settle the real cost when the work finishes.
 
+Clients are isolated from each other: results, profiles and matches are scoped
+to the client that created them, and another client's id returns `404`.
+
 ## Observability
 
 - **Logs** are structured JSON with a `request_id` on every line (API and worker).

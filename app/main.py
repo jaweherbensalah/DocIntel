@@ -241,7 +241,15 @@ async def extract(
     reservation = await reserve_budget(session, client, "extract", len(text))
 
     rid = uuid.uuid4().hex
-    session.add(Result(id=rid, kind="extract", status="pending", payload=None))
+    session.add(
+        Result(
+            id=rid,
+            kind="extract",
+            client_id=client.id,
+            status="pending",
+            payload=None,
+        )
+    )
     await session.commit()
 
     extract_profile.delay(rid, text, request_id_var.get(), reservation.event_id)
@@ -279,7 +287,15 @@ async def match(
     result = get_provider().match(body.profile.model_dump(), body.job_description)
 
     rid = uuid.uuid4().hex
-    session.add(Result(id=rid, kind="match", status="done", payload=json.dumps(result)))
+    session.add(
+        Result(
+            id=rid,
+            kind="match",
+            client_id=client.id,
+            status="done",
+            payload=json.dumps(result),
+        )
+    )
     session.add(
         build_match(
             rid, body.job_description, result, candidate_name=body.profile.name
@@ -345,7 +361,13 @@ async def batch_match(
         "shortlist": [entry.model_dump() for entry in shortlist],
     }
     session.add(
-        Result(id=rid, kind="batch_match", status="done", payload=json.dumps(payload))
+        Result(
+            id=rid,
+            kind="batch_match",
+            client_id=client.id,
+            status="done",
+            payload=json.dumps(payload),
+        )
     )
     for entry, (profile, result) in zip(shortlist, scored):
         session.add(
@@ -382,7 +404,7 @@ async def get_result(
 ):
     stmt = (
         select(Result)
-        .where(Result.id == rid)
+        .where(Result.id == rid, Result.client_id == client.id)
         .options(
             selectinload(Result.profile).selectinload(Profile.skills),
             selectinload(Result.matches),
@@ -390,6 +412,7 @@ async def get_result(
     )
     obj = (await session.execute(stmt)).scalar_one_or_none()
     if obj is None:
+        # 404 rather than 403: another tenant's ids should not be confirmable.
         raise HTTPException(status_code=404, detail="result not found")
     return ResultResponse(
         id=obj.id, kind=obj.kind, status=obj.status, result=_read_result(obj)
@@ -431,7 +454,11 @@ async def search_candidates(
     client: Client = Depends(require_client),
     session: AsyncSession = Depends(get_session),
 ):
-    matching = select(Profile.id).where(Profile.years_experience >= min_years)
+    matching = (
+        select(Profile.id)
+        .join(Result, Result.id == Profile.result_id)
+        .where(Result.client_id == client.id, Profile.years_experience >= min_years)
+    )
 
     wanted = {s.strip().lower() for s in skill if s.strip()}
     if wanted:
