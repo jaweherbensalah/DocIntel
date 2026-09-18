@@ -45,6 +45,9 @@ WORKDIR /app
 # Bring in the dependencies installed in the builder stage.
 COPY --from=builder /install /usr/local
 
+# Must run after the COPY above, which would otherwise put the old one back.
+RUN pip install --no-cache-dir --upgrade setuptools
+
 # Copy only the compiled bytecode from the builder (no .py source, no tests,
 # fixtures, docs, or VCS metadata).
 COPY --from=builder /app/app ./app
