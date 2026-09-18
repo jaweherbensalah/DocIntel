@@ -33,8 +33,12 @@ LABEL org.opencontainers.image.revision=$VCS_REF
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Run as an unprivileged user rather than root.
-RUN useradd --create-home --uid 1000 appuser
+# The base image lags its distro's security updates, so apply them here and run
+# as an unprivileged user. Without this the CI scan gate fails on fixable CVEs.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1000 appuser
 
 WORKDIR /app
 

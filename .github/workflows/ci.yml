@@ -33,7 +33,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
 
       - name: Run tests
         # The suite runs fully offline (SQLite + Celery eager + fake LLM).
@@ -112,6 +112,9 @@ jobs:
           output: trivy.sarif
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          # SARIF reports every severity unless told otherwise, which would
+          # flood code scanning with findings the gate below ignores.
+          limit-severities-for-sarif: true
 
       - name: Upload results to code scanning
         uses: github/codeql-action/upload-sarif@v3
