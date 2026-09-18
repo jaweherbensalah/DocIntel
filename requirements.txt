@@ -10,7 +10,7 @@ python-multipart==0.0.30
 openai==1.35.0
 celery==5.4.0
 redis==5.0.7
-psycopg2-binary==2.9.9  # sync driver used by the Celery worker
+psycopg2-binary==2.9.13  # sync driver used by the Celery worker
 prometheus-client==0.20.0
 opentelemetry-sdk==1.44.0
 opentelemetry-exporter-otlp-proto-http==1.44.0
