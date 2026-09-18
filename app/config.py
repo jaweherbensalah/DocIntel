@@ -31,5 +31,10 @@ class Settings(BaseSettings):
     default_monthly_budget_cents: int = 50_000
     default_rate_limit_per_minute: int = 60
 
+    # Tracing. Off by default: with no provider the spans are non-recording.
+    otel_enabled: bool = False
+    otel_exporter: str = "console"  # "console" | "otlp"
+    otel_endpoint: str = ""
+
 
 settings = Settings()

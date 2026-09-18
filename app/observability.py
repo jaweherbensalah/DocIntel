@@ -56,12 +56,15 @@ class JsonLogFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:
+        from app.tracing import current_trace_id
+
         payload = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(record.created)),
             "level": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),
             "request_id": request_id_var.get(),
+            "trace_id": current_trace_id(),
         }
         extra = getattr(record, "extra_fields", None)
         if extra:
@@ -134,46 +137,60 @@ def render_metrics() -> tuple[bytes, str]:
 # ---------------------------------------------------------------------------
 async def request_context_middleware(request, call_next):
     """Assign/propagate a request id, time the request, log it and count it."""
+    from app.tracing import context_from, tracer
+
     incoming = request.headers.get("x-request-id")
     request_id = incoming or new_request_id()
     token = request_id_var.set(request_id)
 
+    # Continue the caller's trace when they send W3C headers, so a client's
+    # trace and ours are one picture rather than two.
+    parent = context_from({"traceparent": request.headers.get("traceparent", "")})
+
     start = time.perf_counter()
     logger = logging.getLogger("docintel.access")
-    try:
-        response = await call_next(request)
-    except Exception:
+    with tracer().start_as_current_span(
+        f"{request.method} {request.url.path}", context=parent
+    ) as span:
+        span.set_attribute("http.request.method", request.method)
+        span.set_attribute("docintel.request_id", request_id)
+        try:
+            response = await call_next(request)
+        except Exception:
+            duration = time.perf_counter() - start
+            # Use the route template (not the raw path) to keep label cardinality
+            # bounded — e.g. "/results/{rid}" rather than one label per id.
+            path = _route_path(request)
+            HTTP_REQUESTS.labels(request.method, path, "500").inc()
+            HTTP_LATENCY.labels(request.method, path).observe(duration)
+            logger.exception(
+                "request failed",
+                extra={"extra_fields": {
+                    "method": request.method,
+                    "path": path,
+                    "duration_ms": round(duration * 1000, 2),
+                }},
+            )
+            request_id_var.reset(token)
+            raise
+
         duration = time.perf_counter() - start
-        # Use the route template (not the raw path) to keep label cardinality
-        # bounded — e.g. "/results/{rid}" rather than one label per id.
         path = _route_path(request)
-        HTTP_REQUESTS.labels(request.method, path, "500").inc()
+        span.update_name(f"{request.method} {path}")
+        span.set_attribute("http.route", path)
+        span.set_attribute("http.response.status_code", response.status_code)
+        HTTP_REQUESTS.labels(request.method, path, str(response.status_code)).inc()
         HTTP_LATENCY.labels(request.method, path).observe(duration)
-        logger.exception(
-            "request failed",
+        response.headers["X-Request-ID"] = request_id
+        logger.info(
+            "request completed",
             extra={"extra_fields": {
                 "method": request.method,
                 "path": path,
+                "status": response.status_code,
                 "duration_ms": round(duration * 1000, 2),
             }},
         )
-        request_id_var.reset(token)
-        raise
-
-    duration = time.perf_counter() - start
-    path = _route_path(request)
-    HTTP_REQUESTS.labels(request.method, path, str(response.status_code)).inc()
-    HTTP_LATENCY.labels(request.method, path).observe(duration)
-    response.headers["X-Request-ID"] = request_id
-    logger.info(
-        "request completed",
-        extra={"extra_fields": {
-            "method": request.method,
-            "path": path,
-            "status": response.status_code,
-            "duration_ms": round(duration * 1000, 2),
-        }},
-    )
     request_id_var.reset(token)
     return response
 

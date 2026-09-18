@@ -934,3 +934,67 @@ SHAs (with Dependabot keeping them current) is the obvious next step; it is left
 out here only because it is mechanical. Python dependencies are pinned to exact
 versions but not hashes; `pip install --require-hashes` against a compiled
 lockfile would close that.
+
+## Ticket 16: Trace a request end to end
+
+### What was missing
+
+Ticket 7 gave every request an id that ties its log lines together, and metrics
+that show aggregate latency. Neither answers the question this ticket asks: for
+*this* slow request, where did the time actually go? Once the request crossed
+into the queue, the trail stopped at "the worker logged something with the same
+id".
+
+### The one hard part
+
+Trace context does not cross a message broker by itself. The API span exists in
+one process and the task runs minutes later in another, so the W3C `traceparent`
+is captured when the job is enqueued and passed with it as a task argument. The
+worker extracts it and starts its span as a child of the API's, which is what
+makes the whole journey one trace instead of two unrelated ones.
+
+Passing it explicitly rather than through Celery's header machinery keeps it
+working under `task_always_eager`, so the tests exercise the same propagation
+path as production.
+
+Spans nest: HTTP request -> `extract_profile` -> `llm.extract`. That nesting is
+the point, because it separates time spent waiting in the queue from time spent
+in the model, which is exactly the distinction you need at 2am.
+
+We also continue an inbound `traceparent` when a client sends one, so their
+trace and ours are one picture rather than two.
+
+### Off by default, instrumented always
+
+`OTEL_ENABLED` defaults to false. With no provider configured the OpenTelemetry
+API returns non-recording spans, so the instrumentation costs a few attribute
+assignments that go nowhere. That means there is no separate "tracing build" and
+no risk that the traced path behaves differently from the one we ship.
+
+Every log line now also carries `trace_id`, so a log search leads to a trace and
+back again.
+
+### Cardinality
+
+Span names use the route template (`GET /results/{rid}`), not the raw path.
+Naming spans after the id would produce a unique operation per request, which
+makes aggregate views useless in exactly the same way it breaks Prometheus
+labels.
+
+### How to verify
+
+```bash
+pytest -q
+```
+
+`tests/test_tracing.py` collects spans with an in-memory exporter and asserts
+that one `POST /extract` produces API, task and model spans sharing a single
+trace id, that the model span's parent is the task span, that an inbound
+`traceparent` is continued rather than replaced, and that span names use the
+route template.
+
+Live:
+
+```bash
+OTEL_ENABLED=true docker compose up --build
+```

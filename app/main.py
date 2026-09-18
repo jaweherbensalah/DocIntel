@@ -35,6 +35,7 @@ from app.observability import (
 )
 from app.persistence import build_match, matches_to_dict, profile_to_dict
 from app.sanitize import sanitise_document, sanitise_job_description
+from app.tracing import carrier, configure_tracing
 from app.schemas import (
     BatchMatchRequest,
     BatchMatchResponse,
@@ -51,6 +52,7 @@ from app.schemas import (
 from app.tasks import extract_profile
 
 configure_logging()
+configure_tracing("docintel-api")
 logger = logging.getLogger("docintel")
 
 UPLOAD_DIR = "uploads"
@@ -260,7 +262,9 @@ async def extract(
     )
     await session.commit()
 
-    extract_profile.delay(rid, text, request_id_var.get(), reservation.event_id)
+    extract_profile.delay(
+        rid, text, request_id_var.get(), reservation.event_id, carrier()
+    )
     logger.info(
         "extraction enqueued",
         extra={"extra_fields": {"rid": rid, "bytes": len(content)}},

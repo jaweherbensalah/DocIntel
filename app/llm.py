@@ -13,6 +13,7 @@ import time
 
 from app.config import settings
 from app.sanitize import assert_no_egress, validate_match, validate_profile
+from app.tracing import tracer
 
 logger = logging.getLogger("docintel.llm")
 
@@ -65,30 +66,36 @@ SKILLS = [
 
 class FakeProvider:
     def extract(self, text: str) -> dict:
-        time.sleep(settings.llm_latency)  # pretend the model is working
-        lowered = text.lower()
-        skills = sorted({s for s in SKILLS if s in lowered})
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        name = lines[0][:80] if lines else "Unknown"
-        years = 0
-        m = re.search(r"(\d+)\s*\+?\s*years", lowered)
-        if m:
-            years = int(m.group(1))
-        return {"name": name, "skills": skills, "years_experience": years}
+        with tracer().start_as_current_span("llm.extract") as span:
+            span.set_attribute("llm.provider", "fake")
+            span.set_attribute("llm.input_chars", len(text))
+            time.sleep(settings.llm_latency)  # pretend the model is working
+            lowered = text.lower()
+            skills = sorted({s for s in SKILLS if s in lowered})
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            name = lines[0][:80] if lines else "Unknown"
+            years = 0
+            m = re.search(r"(\d+)\s*\+?\s*years", lowered)
+            if m:
+                years = int(m.group(1))
+            return {"name": name, "skills": skills, "years_experience": years}
 
     def match(self, profile: dict, job_description: str) -> dict:
-        time.sleep(settings.llm_latency)
-        job = job_description.lower()
-        required = sorted({s for s in SKILLS if s in job})
-        have = {s.lower() for s in profile.get("skills", [])}
-        matched = [s for s in required if s in have]
-        score = round(100 * len(matched) / len(required)) if required else 0
-        return {
-            "score": score,
-            "matched_skills": matched,
-            "missing_skills": [s for s in required if s not in have],
-            "rationale": f"Candidate matches {len(matched)}/{len(required)} required skills.",
-        }
+        with tracer().start_as_current_span("llm.match") as span:
+            span.set_attribute("llm.provider", "fake")
+            time.sleep(settings.llm_latency)
+            job = job_description.lower()
+            required = sorted({s for s in SKILLS if s in job})
+            have = {s.lower() for s in profile.get("skills", [])}
+            matched = [s for s in required if s in have]
+            score = round(100 * len(matched) / len(required)) if required else 0
+            span.set_attribute("llm.score", score)
+            return {
+                "score": score,
+                "matched_skills": matched,
+                "missing_skills": [s for s in required if s not in have],
+                "rationale": f"Candidate matches {len(matched)}/{len(required)} required skills.",
+            }
 
 
 class OpenAIProvider:
@@ -110,17 +117,20 @@ class OpenAIProvider:
                 f"<<<{label}:{nonce}>>>\n{body}\n<<<END {label}:{nonce}>>>"
             )
 
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT.format(nonce=nonce)},
-                {"role": "user", "content": instruction},
-                {"role": "user", "content": "\n\n".join(blocks)},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0,
-        )
-        out = resp.choices[0].message.content or "{}"
+        with tracer().start_as_current_span("llm.chat") as span:
+            span.set_attribute("llm.provider", "openai")
+            span.set_attribute("llm.model", self.model)
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT.format(nonce=nonce)},
+                    {"role": "user", "content": instruction},
+                    {"role": "user", "content": "\n\n".join(blocks)},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0,
+            )
+            out = resp.choices[0].message.content or "{}"
         assert_no_egress(out, [SYSTEM_PROMPT, nonce, settings.openai_api_key])
         return out
 

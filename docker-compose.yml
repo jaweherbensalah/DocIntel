@@ -24,6 +24,9 @@ services:
       DATABASE_URL: postgresql+asyncpg://docintel:docintel@db:5432/docintel
       REDIS_URL: redis://redis:6379/0
       API_KEY: ${API_KEY:-dev-local-key-change-me}
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_EXPORTER: ${OTEL_EXPORTER:-console}
+      OTEL_ENDPOINT: ${OTEL_ENDPOINT:-}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -47,6 +50,9 @@ services:
       # Aggregate metrics across the worker's prefork child processes.
       PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus_multiproc
       WORKER_METRICS_PORT: 9100
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_EXPORTER: ${OTEL_EXPORTER:-console}
+      OTEL_ENDPOINT: ${OTEL_ENDPOINT:-}
     depends_on:
       migrate:
         condition: service_completed_successfully

@@ -13,21 +13,37 @@ from app.models import Profile, Result
 from app.observability import request_id_var
 from app.persistence import build_profile
 from app.sync_db import SyncSessionLocal
+from app.tracing import context_from, tracer
 
 logger = logging.getLogger("docintel.tasks")
 
 
 @celery_app.task(name="extract_profile", bind=True, max_retries=3, default_retry_delay=5)
 def extract_profile(
-    self, rid: str, text: str, request_id: str = "-", event_id: str = ""
+    self,
+    rid: str,
+    text: str,
+    request_id: str = "-",
+    event_id: str = "",
+    trace_carrier: dict = None,
 ) -> None:
     """Run the (slow) extraction off the request path and store the result.
 
     ``event_id`` is the budget reservation the API took before enqueueing; it
     is settled at the real cost here, or released if the work never happened.
+    ``trace_carrier`` carries the W3C traceparent so the worker's spans join
+    the trace the HTTP request started.
     """
     request_id_var.set(request_id)
     started = time.perf_counter()
+
+    with tracer().start_as_current_span(
+        "extract_profile", context=context_from(trace_carrier)
+    ) as span:
+        span.set_attribute("docintel.result_id", rid)
+        span.set_attribute("docintel.document_chars", len(text))
+        _run_extraction(self, rid, text, event_id, started)
+def _run_extraction(self, rid: str, text: str, event_id: str, started: float) -> None:
     logger.info("extraction started", extra={"extra_fields": {"rid": rid}})
     with SyncSessionLocal() as session:
         obj = session.get(Result, rid)

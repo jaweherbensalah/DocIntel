@@ -63,6 +63,9 @@ to the client that created them, and another client's id returns `404`.
 - **Correlation**: each response carries an `X-Request-ID` (accepted from the
   client if supplied); the same id flows into the worker, so a single request
   can be traced across the API and the queue in the logs.
+- **Tracing**: set `OTEL_ENABLED=true` for spans covering the API request, the
+  queued task and the model call under one trace id. `OTEL_EXPORTER=otlp` with
+  `OTEL_ENDPOINT` sends them to a collector; the default prints to stdout.
 
 ## Examples
 
