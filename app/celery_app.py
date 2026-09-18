@@ -22,11 +22,20 @@ celery_app.conf.update(
     # Only acknowledge a job once it has finished, not when it is picked up.
     # If a worker crashes mid-job, the job is redelivered instead of lost.
     task_acks_late=True,
+    # acks_late alone does not cover a worker that is SIGKILLed: without this
+    # the job is silently dropped rather than requeued.
+    task_reject_on_worker_lost=True,
+    # How long the broker waits for an ack before handing the job to someone
+    # else. Must exceed the slowest task or work gets run twice needlessly.
+    broker_transport_options={"visibility_timeout": 3600},
     # Fetch one job at a time per worker slot so slow jobs don't hog a worker
-    # that has already prefetched a backlog.
+    # that has already prefetched a backlog. Also keeps queue depth honest,
+    # which is what the autoscaler scales on.
     worker_prefetch_multiplier=1,
     # Report a "started" state so clients/monitoring can see work in progress.
     task_track_started=True,
+    task_time_limit=600,
+    task_soft_time_limit=540,
 )
 
 # Structured logging, task metrics and the worker metrics server.

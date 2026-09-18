@@ -11,6 +11,7 @@ Plain manifests — no Helm, no operators — applied in filename order.
 | `35-migrate-job.yaml` | One-shot Job running `alembic upgrade head` |
 | `40-api.yaml` | FastAPI Deployment (2 replicas) + Service |
 | `50-worker.yaml` | Celery worker Deployment (2 replicas) |
+| `55-worker-autoscale.yaml` | KEDA ScaledObject on queue depth + PodDisruptionBudget |
 | `60-networkpolicy.yaml` | Restrict Postgres/Redis to this app's pods |
 
 ## Deploy to a local cluster (kind)
@@ -78,7 +79,8 @@ These are deliberate scope choices, not oversights:
 - **`uploads/` is per-pod scratch.** The debug copies of uploads go to an
   `emptyDir`, so they are pod-local and lost on restart. If they mattered they
   would belong in object storage, not a volume.
-- **No autoscaling.** Replica counts are fixed; scaling workers off queue depth
-  is Ticket 15.
+- **Autoscaling needs KEDA installed.** Without it the worker Deployment just
+  runs at its static replica count; `55-worker-autoscale.yaml` applies cleanly
+  either way.
 - **No Ingress.** Access is via `port-forward`, since the ingress controller and
   TLS/hostname setup are environment-specific.

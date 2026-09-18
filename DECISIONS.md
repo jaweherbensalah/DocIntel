@@ -998,3 +998,64 @@ Live:
 ```bash
 OTEL_ENABLED=true docker compose up --build
 ```
+
+## Ticket 15: Autoscale the workers, and never drop a job
+
+### Scale on backlog, not CPU
+
+A worker blocked on a slow model call is idle by CPU and busy by every measure
+that matters, so a CPU-based HPA would scale down exactly when the queue is
+deepest. `55-worker-autoscale.yaml` uses a KEDA `ScaledObject` reading the depth
+of the Celery list in Redis: one extra worker per five queued jobs.
+
+The asymmetry in the scaling behaviour is deliberate. Scale-up has a zero
+stabilisation window because bursty load is the normal case here and a queue
+that is already backing up should not wait to be believed. Scale-down uses a
+300s window, and `cooldownPeriod` matches, so a brief lull cannot evict a worker
+that is halfway through an extraction.
+
+`minReplicaCount` is 1 rather than 0: scale-to-zero would put a pod cold start
+in front of the first job after an idle period. Zero is the right answer if cost
+dominates, and it is a one-line change.
+
+`worker_prefetch_multiplier=1` matters more than it looks here. If workers
+hoard prefetched jobs, the queue looks empty while work is sitting in worker
+memory, and the autoscaler scales down into a backlog it cannot see.
+
+### Never dropping a job
+
+Exactly-once delivery does not exist. What is achievable is at-least-once
+delivery plus handlers that are safe to run twice, which is indistinguishable
+from exactly-once as far as the data is concerned.
+
+At-least-once comes from:
+
+- `task_acks_late`: a job is acknowledged after it finishes, not when picked up.
+- `task_reject_on_worker_lost`: **acks_late alone is not enough.** If a worker
+  is SIGKILLed (OOM, node loss, an impatient scale-down) the job is otherwise
+  silently dropped rather than requeued. This is the setting people miss.
+- `visibility_timeout` of 3600s, comfortably above the 600s task time limit, so
+  the broker does not hand a still-running job to a second worker.
+- `terminationGracePeriodSeconds: 60` on the pod, so a rolling deploy or
+  scale-down lets the current task finish instead of relying on redelivery.
+- A `PodDisruptionBudget`, so a node drain cannot take every worker at once and
+  stop the queue draining entirely.
+
+Safe-to-run-twice comes from work already done: the extraction skips inserting a
+profile that exists, and settlement only acts on a `usage_event` still in the
+`reserved` state, so a redelivered job cannot double-charge.
+
+### How to verify
+
+The scaling half needs a cluster with KEDA, so it is delivered as manifests.
+The half that can be proven offline is proven:
+
+```bash
+pytest -q
+```
+
+`tests/test_redelivery.py` runs the same task twice, exactly as a redelivery
+would, and asserts one profile row, one charge, and a released reservation when
+the job's result no longer exists. It also asserts the queue settings that make
+redelivery possible, so removing `task_reject_on_worker_lost` fails the build
+rather than quietly losing jobs in production.
