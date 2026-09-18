@@ -5,7 +5,7 @@ sqlalchemy[asyncio]==2.0.31
 alembic==1.13.2
 asyncpg==0.30.0
 pydantic==2.9.0
-pydantic-settings==2.4.0  
+pydantic-settings==2.15.0  
 python-multipart==0.0.30
 openai==1.35.0
 celery==5.4.0
